@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Macka Poker Equity Trainer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#1b2838" />
+
+  <!-- Icons for homescreen / PWA -->
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="icon-180.png" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Macka Poker" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+  <!-- App styles -->
+  <link rel="stylesheet" href="Style.css" />
+</head>
+<body class="compact-auto">
+  <noscript>
+    <div style="padding:12px;background:#b91c1c;color:#fff;text-align:center">
+      JavaScript is required to run the Macka Poker Equity Trainer.
+    </div>
+  </noscript>
+
+  <div class="app">
+    <header class="app-header">
+      <h1>Macka Poker Equity Trainer</h1>
+      <div class="controls">
+        <div class="control-group">
+          <label for="difficulty">Difficulty</label>
+          <select id="difficulty">
+            <option value="beginner">Beginner</option>
+            <option value="intermediate">Intermediate</option>
+            <option value="expert">Expert</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label for="timerRange">Timer (seconds)</label>
+          <input type="range" id="timerRange" min="3" max="59" value="10" />
+          <span id="timerValue">10</span>
+        </div>
+
+        <button id="newHandBtn" class="primary">New Hand</button>
+        <!-- ⚙ Settings button is injected by Script.js next to "New Hand" -->
+      </div>
+    </header>
+
+    <!-- Sticky KPI bar (mobile-first) -->
+    <div class="kpi-bar" id="kpiBar" aria-live="polite">
+      <span class="chip" id="kpiStage">Stage: —</span>
+      <span class="chip" id="kpiPot">Pot: £0</span>
+      <span class="chip" id="kpiToCall">To Call: £0</span>
+      <span class="chip secondary" id="kpiTimer">Time: —</span>
+    </div>
+
+    <main class="table">
+      <section class="cards-panel">
+        <div class="cards-row">
+          <h2>Hole Cards</h2>
+          <div id="holeCards" class="card-row"></div>
+        </div>
+
+        <div class="cards-row">
+          <h2>Board</h2>
+          <div id="boardCards" class="card-row"></div>
+        </div>
+      </section>
+
+      <section class="info-panel">
+        <!-- Full pot info kept for desktop; KPI bar duplicates essentials -->
+        <div class="pot-info desktop-only">
+          <div><strong>Stage:</strong> <span id="stageLabel">—</span></div>
+          <div><strong>Pot:</strong> £<span id="potSize">0</span></div>
+          <div><strong>To Call:</strong> £<span id="toCall">0</span></div>
+          <div><strong>Scenario:</strong> <span id="scenarioLabel">—</span></div>
+        </div>
+
+        <div class="timer-display desktop-only">
+          <span>Time left:</span>
+          <span id="timerCountdown">—</span>
+        </div>
+
+        <form id="inputForm" class="mobile-form">
+          <div class="form-columns">
+            <div class="form-group number-stepper">
+              <label for="equityInput">Your est. win %</label>
+              <div class="stepper">
+                <button type="button" class="step-btn" data-target="equityInput" data-step="-1">−</button>
+                <input type="number" id="equityInput" min="0" max="100" step="0.1" required />
+                <button type="button" class="step-btn" data-target="equityInput" data-step="1">+</button>
+              </div>
+            </div>
+
+            <div class="form-group number-stepper">
+              <label for="potOddsInput">Your est. pot odds %</label>
+              <div class="stepper">
+                <button type="button" class="step-btn" data-target="potOddsInput" data-step="-1">−</button>
+                <input type="number" id="potOddsInput" min="0" max="100" step="0.1" required />
+                <button type="button" class="step-btn" data-target="potOddsInput" data-step="1">+</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Legacy segmented decision (kept for compatibility; hidden by the unified panel) -->
+          <div class="form-group">
+            <label>Decision</label>
+            <div class="segmented" role="radiogroup" aria-label="Decision">
+              <input type="radio" name="decision" value="fold" id="decFold" />
+              <label for="decFold">Fold</label>
+
+              <input type="radio" name="decision" value="call" id="decCall" />
+              <label for="decCall">Call</label>
+
+              <input type="radio" name="decision" value="raise" id="decRaise" />
+              <label for="decRaise">Raise</label>
+            </div>
+          </div>
+
+          <!-- Hints: summary + collapsible details -->
+          <div id="hints" class="hints"></div>
+          <details class="hint-details" id="hintDetails">
+            <summary>More details</summary>
+            <div id="hintsDetailBody"></div>
+          </details>
+
+          <!-- Desktop actions (mobile uses bottom bar) -->
+          <div class="desktop-only">
+            <button type="submit" class="primary" id="submitStageBtn">Submit</button>
+            <button type="button" class="primary hidden" id="nextStageBtn">Next Stage</button>
+          </div>
+        </form>
+
+        <div id="feedback" class="feedback"></div>
+      </section>
+    </main>
+
+    <section class="summary-panel" id="summaryPanel">
+      <h2>Hand Summary</h2>
+      <div id="summaryContent"></div>
+      <div class="summary-actions">
+        <button id="downloadCsvBtn">Download CSV</button>
+        <button id="closeSummaryBtn" class="primary">Close</button>
+      </div>
+    </section>
+
+    <footer class="app-footer">
+      <div id="sessionStats"></div>
+      <div class="footer-actions">
+        <button id="resetStatsBtn" class="btn">Reset Statistics</button>
+      </div>
+    </footer>
+
+    <!-- Sticky bottom action bar (mobile-first) -->
+    <div class="bottom-bar mobile-only" id="bottomBar">
+      <div class="pot-quick">
+        <span id="barPotOdds">Pot odds —</span>
+      </div>
+      <div class="bar-actions">
+        <button type="button" class="primary" id="barSubmitBtn">Submit</button>
+        <button type="button" class="primary hidden" id="barNextBtn">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Legacy app logic (dealing, MC, etc.). Must load first. -->
+  <script src="Script.js"></script>
+
+  <!-- NEW modular layer (unified betting, position disc, policies). Uses ES Modules. -->
+  <!-- Use a local web server (e.g., VS Code Live Server) so module imports work correctly. -->
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
