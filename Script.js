@@ -1,4 +1,4 @@
-// ====== Core state ======
+// ==================== Core state ====================
 const STAGES = ["preflop", "flop", "turn", "river"];
 let deck = [];
 let holeCards = [];
@@ -14,7 +14,7 @@ let difficulty = "beginner";
 let handHistory = [];
 let sessionHistory = [];
 
-// ====== DOM ======
+// ==================== DOM (existing) ====================
 const holeCardsEl = document.getElementById("holeCards");
 const boardCardsEl = document.getElementById("boardCards");
 const potSizeEl = document.getElementById("potSize");
@@ -38,7 +38,7 @@ const submitStageBtn = document.getElementById("submitStageBtn");
 const nextStageBtn = document.getElementById("nextStageBtn");
 const resetStatsBtn = document.getElementById("resetStatsBtn");
 
-// ====== Mobile UX DOM ======
+// Mobile KPI bar
 const kpiStageEl = document.getElementById("kpiStage");
 const kpiPotEl = document.getElementById("kpiPot");
 const kpiCallEl = document.getElementById("kpiToCall");
@@ -50,104 +50,105 @@ const barNext = document.getElementById("barNextBtn");
 const hintDetails = document.getElementById("hintDetails");
 const hintsDetailBody = document.getElementById("hintsDetailBody");
 
-// ====== Utility: deck & cards ======
-const SUITS = ["\u2660", "\u2665", "\u2666", "\u2663"];
-const RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"];
+// ==================== Cards & deck ====================
+const SUITS = ["\u2660", "\u2665", "\u2666", "\u2663"]; // ♠ ♥ ♦ ♣
+const RANKS = ["2","3","4","5","6","7","8","9","T","J","Q","K","A"];
 const RANK_TO_VAL = { '2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'T':10,'J':11,'Q':12,'K':13,'A':14 };
 
-function createDeck() {
+function createDeck(){
   const d = [];
-  for (let s = 0; s < SUITS.length; s++) {
-    for (let r = 0; r < RANKS.length; r++) {
+  for (let s=0;s<SUITS.length;s++){
+    for (let r=0;r<RANKS.length;r++){
       d.push({ rank: RANKS[r], suit: SUITS[s] });
     }
   }
   return d;
 }
-function shuffle(array) {
-  for (let i = array.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [array[i], array[j]] = [array[j], array[i]];
+function shuffle(array){
+  for (let i=array.length-1;i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [array[i],array[j]] = [array[j],array[i]];
   }
 }
-function dealCard() { return deck.pop(); }
+function dealCard(){ return deck.pop(); }
+function containsCard(list, card){ return list.some(c => c.rank===card.rank && c.suit===card.suit); }
 
-// ====== Betting normalization (5-quid chunks) ======
-function toStep5(value) { return Math.round((Number(value) ?? 0) / 5) * 5; }
-function clampNonNegative(v) { return Math.max(0, Number.isFinite(v) ? v : 0); }
-function computeRoundedBetAndPot(potBefore, factor) {
-  const rawBet = clampNonNegative(potBefore * factor);
+// ==================== Betting normalization ====================
+function toStep5(value){ return Math.round((Number(value) ?? 0)/5)*5; }
+function clampNonNegative(v){ return Math.max(0, Number.isFinite(v) ? v : 0); }
+function computeRoundedBetAndPot(potBefore, factor){
+  const rawBet = clampNonNegative(potBefore*factor);
   let bet = toStep5(rawBet);
-  if (bet === 0 && rawBet > 0) bet = 5;
+  if (bet===0 && rawBet>0) bet=5;
   const newPot = toStep5(potBefore + bet);
   return { bet, newPot };
 }
 
-// ====== Rendering ======
-function renderCards() {
-  holeCardsEl.innerHTML = "";
-  boardCardsEl.innerHTML = "";
-  holeCards.forEach(card => { holeCardsEl.appendChild(createCardEl(card)); });
-  boardCards.forEach(card => { boardCardsEl.appendChild(createCardEl(card)); });
-}
-function createCardEl(card) {
+// ==================== Rendering cards ====================
+function createCardEl(card){
   const div = document.createElement("div");
   div.className = "card";
   if (card.suit === "\u2665" || card.suit === "\u2666") div.classList.add("red");
-  const rankTop = document.createElement("div"); rankTop.className = "rank"; rankTop.textContent = card.rank;
-  const suitMid = document.createElement("div"); suitMid.className = "suit"; suitMid.textContent = card.suit;
-  const rankBottom = document.createElement("div"); rankBottom.className = "rank"; rankBottom.textContent = card.rank;
+  const rankTop = document.createElement("div"); rankTop.className="rank"; rankTop.textContent = card.rank;
+  const suitMid = document.createElement("div"); suitMid.className="suit"; suitMid.textContent = card.suit;
+  const rankBottom = document.createElement("div"); rankBottom.className="rank"; rankBottom.textContent = card.rank;
   div.append(rankTop, suitMid, rankBottom);
   return div;
 }
-function updatePotInfo() {
-  pot = toStep5(pot);
-  toCall = toStep5(toCall);
-  const stageName = STAGES[currentStageIndex].toUpperCase();
+function renderCards(){
+  holeCardsEl.innerHTML = ""; boardCardsEl.innerHTML = "";
+  holeCards.forEach(c => holeCardsEl.appendChild(createCardEl(c)));
+  boardCards.forEach(c => boardCardsEl.appendChild(createCardEl(c)));
+}
 
-  // Desktop labels
+// ==================== Pot / KPI ====================
+function computePotOdds(pot, callAmount){ if (callAmount<=0) return 0; return (callAmount/(pot+callAmount))*100; }
+
+function updatePotInfo(){
+  pot = toStep5(pot); toCall = toStep5(toCall);
+  const stageName = STAGES[currentStageIndex].toUpperCase();
   if (potSizeEl) potSizeEl.textContent = pot.toFixed(0);
   if (toCallEl) toCallEl.textContent = toCall.toFixed(0);
   if (stageLabelEl) stageLabelEl.textContent = stageName;
   if (scenarioLabelEl) scenarioLabelEl.textContent = scenario ? scenario.label : "—";
 
-  // Sticky KPI bar
   if (kpiStageEl) kpiStageEl.textContent = `Stage: ${stageName}`;
   if (kpiPotEl) kpiPotEl.textContent = `Pot: £${pot.toFixed(0)}`;
   if (kpiCallEl) kpiCallEl.textContent = `To Call: £${toCall.toFixed(0)}`;
   const tl = (timeLeft==null) ? "—" : `${Math.max(0,timeLeft)}s`;
   if (kpiTimerEl) kpiTimerEl.textContent = `Time: ${tl}`;
 
-  // Bottom quick pot-odds snippet
   const pOdds = computePotOdds(pot, toCall);
   if (barPotOdds) barPotOdds.textContent = isFinite(pOdds) ? `Pot odds ${pOdds.toFixed(1)}%` : 'Pot odds —';
+
+  // Phase 2: keep Bet/Raise label + size rows in sync
+  updateDecisionLabels();
 }
 
-// ====== Timer ======
-function startTimer() {
+// ==================== Timer ====================
+function startTimer(){
   clearTimer();
   timeLeft = timerSeconds;
   if (timerCountdownEl) timerCountdownEl.textContent = `${timeLeft}s`;
   if (kpiTimerEl) kpiTimerEl.textContent = `Time: ${Math.max(0,timeLeft)}s`;
-  timerId = setInterval(() => {
+  timerId = setInterval(()=> {
     timeLeft -= 1;
-    if (timeLeft <= 0) {
+    if (timeLeft<=0){
       if (timerCountdownEl) timerCountdownEl.textContent = "0s";
-      clearInterval(timerId);
-      timerId = null;
+      clearInterval(timerId); timerId = null;
     } else {
       if (timerCountdownEl) timerCountdownEl.textContent = `${timeLeft}s`;
     }
     if (kpiTimerEl) kpiTimerEl.textContent = `Time: ${Math.max(0,timeLeft)}s`;
   }, 1000);
 }
-function clearTimer() {
-  if (timerId) { clearInterval(timerId); timerId = null; }
+function clearTimer(){
+  if (timerId){ clearInterval(timerId); timerId = null; }
   if (timerCountdownEl) timerCountdownEl.textContent = "—";
   if (kpiTimerEl) kpiTimerEl.textContent = "Time: —";
 }
-function maybeStartTimer() {
-  if (difficulty === "beginner") {
+function maybeStartTimer(){
+  if (difficulty==="beginner"){
     clearTimer();
     if (timerCountdownEl) timerCountdownEl.textContent = "No timer in Beginner Mode";
   } else {
@@ -155,372 +156,406 @@ function maybeStartTimer() {
   }
 }
 
-// ====== Board texture & tags (BOARD-ONLY connectedness) ======
-function analyzeBoard(board, hole) {
-  function longestBoardRunRanks(boardCards) {
-    const idxs = [...new Set(boardCards.map(c => RANKS.indexOf(c.rank)))].sort((a,b)=>a-b);
-    if (idxs.length === 0) return 0;
-    let run = 1, best = 1;
+// ==================== Board texture analyzer ====================
+function analyzeBoard(board, hole){
+  function longestBoardRunRanks(boardCards){
+    const idxs = [...new Set(boardCards.map(c=>RANKS.indexOf(c.rank)))].sort((a,b)=>a-b);
+    if (idxs.length===0) return 0;
+    let run=1, best=1;
     for (let i=1;i<idxs.length;i++){
-      if (idxs[i] === idxs[i-1]) continue;
-      if (idxs[i] === idxs[i-1] + 1) { run++; best = Math.max(best, run); }
-      else { run = 1; }
+      if (idxs[i]===idxs[i-1]) continue;
+      if (idxs[i]===idxs[i-1]+1){ run++; best=Math.max(best,run); }
+      else run=1;
     }
     return best;
   }
 
-  const boardRanksCount = {};
-  const boardSuitsCount = {};
-  board.forEach(c => {
-    boardRanksCount[c.rank] = (boardRanksCount[c.rank] ?? 0) + 1;
-    boardSuitsCount[c.suit] = (boardSuitsCount[c.suit] ?? 0) + 1;
-  });
+// Local helper: does the board contain ≥2 broadway ranks (T, J, Q, K, A)?
+  function boardHasManyBroadwaysLocal(boardCards){
+    const BW = new Set(["T","J","Q","K","A"]);
+    let cnt = 0;
+    boardCards.forEach(c => { if (BW.has(c.rank)) cnt++; });
+    return cnt >= 2;
+  }
 
-  const paired = Object.values(boardRanksCount).some(v => v >= 2);
+  const boardRanksCount = {}; const boardSuitsCount = {};
+  board.forEach(c => { boardRanksCount[c.rank]=(boardRanksCount[c.rank]??0)+1; boardSuitsCount[c.suit]=(boardSuitsCount[c.suit]??0)+1; });
+  const paired = Object.values(boardRanksCount).some(v=>v>=2);
   const suitCounts = Object.values(boardSuitsCount);
   const maxSuitOnBoard = suitCounts.length ? Math.max(...suitCounts) : 0;
   const suitKinds = Object.keys(boardSuitsCount).length;
-  const mono = maxSuitOnBoard >= 3;
-  const twoTone = (board.length >= 3 && suitKinds === 2 && !mono);
-  const rainbow = (board.length >= 3 && suitKinds >= 3 && !mono);
+  const mono = maxSuitOnBoard>=3;
+  const twoTone = (board.length>=3 && suitKinds===2 && !mono);
+  const rainbow = (board.length>=3 && suitKinds>=3 && !mono);
   const boardRun = longestBoardRunRanks(board);
+  const isFlop = board.length===3, isTurn = board.length===4, isRiver = board.length===5;
+  let connected=false, semiConnected=false, fourToStraight=false, straightOnBoard=false;
 
-  const isFlop = board.length === 3;
-  const isTurn = board.length === 4;
-  const isRiver = board.length === 5;
-
-  let connected = false;
-  let semiConnected = false;
-  let fourToStraight = false;
-  let straightOnBoard = false;
-
-  if (isFlop) {
-    connected = (boardRun >= 3);
-    if (!connected) {
-      const vals = [...new Set(board.map(c => RANKS.indexOf(c.rank)))].sort((a,b)=>a-b);
-      if (vals.length === 3) {
+  if (isFlop){
+    connected = (boardRun>=3);
+    if (!connected){
+      const vals = [...new Set(board.map(c=>RANKS.indexOf(c.rank)))].sort((a,b)=>a-b);
+      if (vals.length===3){
         const gaps = [vals[1]-vals[0], vals[2]-vals[1]];
-        semiConnected = (gaps.includes(2) && gaps.includes(1)); // e.g., 4-6-7 or 4-5-7
+        semiConnected = (gaps.includes(2) && gaps.includes(1));
       }
     }
   } else {
-    const rv = new Set(board.map(c => RANK_TO_VAL[c.rank]));
-    if (rv.has(14)) rv.add(1); // wheel
+    const rv = new Set(board.map(c=>RANK_TO_VAL[c.rank]));
+    if (rv.has(14)) rv.add(1);
     const ordered = [...rv].sort((a,b)=>a-b);
     let run=1, maxRun=1;
     for (let i=1;i<ordered.length;i++){
-      if (ordered[i] === ordered[i-1]) continue;
-      if (ordered[i] === ordered[i-1]+1) { run++; maxRun = Math.max(maxRun, run); }
-      else { run = 1; }
+      if (ordered[i]===ordered[i-1]) continue;
+      if (ordered[i]===ordered[i-1]+1){ run++; maxRun=Math.max(maxRun,run); }
+      else run=1;
     }
-    straightOnBoard = (isRiver && maxRun >= 5);
-
+    straightOnBoard = (isRiver && maxRun>=5);
     run=1; maxRun=1;
     for (let i=1;i<ordered.length;i++){
-      if (ordered[i] === ordered[i-1]+1) { run++; maxRun = Math.max(maxRun, run); }
-      else if (ordered[i] !== ordered[i-1]) { run = 1; }
+      if (ordered[i]===ordered[i-1]+1){ run++; maxRun=Math.max(maxRun,run); }
+      else if (ordered[i]!==ordered[i-1]) { run=1; }
     }
-    fourToStraight = (maxRun >= 4);
-    connected = (!isRiver && (fourToStraight || boardRun >= 3));
+    fourToStraight = (maxRun>=4);
+    connected = (!isRiver && (fourToStraight || boardRun>=3));
   }
 
-  // Hero-level: do YOU have a flush draw among 7 cards?
+  // Hero flush draw among 7 cards
   const all = [...board, ...hole];
-  const heroSuitCounts = {};
-  all.forEach(c => { heroSuitCounts[c.suit] = (heroSuitCounts[c.suit] ?? 0) + 1; });
-  const heroFlushDraw = Object.values(heroSuitCounts).some(v => v === 4);
+  const heroSuitCounts = {}; all.forEach(c => { heroSuitCounts[c.suit]=(heroSuitCounts[c.suit]??0)+1; });
+  const heroFlushDraw = Object.values(heroSuitCounts).some(v=>v===4);
 
-  // Tags
   const tags = [];
   if (paired) tags.push({label:"Paired", sev:"amber"});
   if (mono) tags.push({label:"Monotone", sev:"amber"});
-  if (twoTone) tags.push({label:"Two‑tone", sev:"green"});
+  if (twoTone) tags.push({label:"Two‑tone", sev:"amber"});
   if (rainbow) tags.push({label:"Rainbow", sev:"green"});
-
-  // Flush signalling by street
   if (isFlop && twoTone) tags.push({label:"Flush Possible", sev:"amber"});
-  if ((isTurn || isRiver) && maxSuitOnBoard >= 3) {
+  if ((isTurn || isRiver) && maxSuitOnBoard>=3){
     tags.push({label: isRiver ? "Flushy Board" : "Flush Possible", sev: isRiver ? "red" : "amber"});
   }
-
   if (straightOnBoard) tags.push({label:"Straight on Board", sev:"red"});
   if (fourToStraight && !straightOnBoard) tags.push({label:"4‑Straight", sev:"amber"});
   if (connected && !fourToStraight && !straightOnBoard) tags.push({label:"Connected", sev:"amber"});
   if (!connected && semiConnected) tags.push({label:"Semi‑Connected", sev:"amber"});
 
-  // Legacy warnings
   const warnings = [];
   if (paired) warnings.push("Paired board – full house / trips possible.");
   if (mono) warnings.push("Monotone board – flush possible.");
   if (fourToStraight || connected || semiConnected) warnings.push("Straight possibilities present.");
   if (heroFlushDraw) warnings.push("You have a flush draw.");
 
-  let drawStrength = "green";
-  if (paired || mono || fourToStraight || connected || semiConnected) drawStrength = "amber";
-  if ((paired && mono) || straightOnBoard) drawStrength = "red";
+  let drawStrength="green";
+  if (paired || mono || fourToStraight || connected || semiConnected) drawStrength="amber";
+  if ((paired && mono) || straightOnBoard) drawStrength="red";
 
-  return { warnings, heroFlushDraw, drawStrength, tags,
-    paired, mono, connected, fourToStraight };
-}
-
-// ====== Helpers: rank counts & descriptors ======
-function countRankIn(hole, board, rank) {
-  let n = 0;
-  hole.forEach(c => { if (c.rank === rank) n++; });
-  board.forEach(c => { if (c.rank === rank) n++; });
-  return n;
-}
-function remainingOfRank(hole, board, rank) {
-  return Math.max(0, 4 - countRankIn(hole, board, rank));
-}
-function describeMadeHand(hole, board) {
-  const score = evaluate7(hole, board);
-  if (score.cat === 1) {
-    const pairRank = score.ranks[0];
-    return { cat: score.cat, label: `One Pair (${Object.keys(RANK_TO_VAL).find(k=>RANK_TO_VAL[k]===pairRank)})` };
+// ===== Moisture / Wetness scoring =====
+  // Build a wetnessScore from existing signals.
+  let wetnessScore = 0;
+  if (mono) wetnessScore += 3.0;          // strongest flush pressure
+  if (twoTone) wetnessScore += 1.5;       // flush possible (two suits only)
+  if (fourToStraight) wetnessScore += 2.0;// strong straight pressure
+  if (connected) wetnessScore += 1.0;     // connected ranks
+  if (semiConnected) wetnessScore += 0.5; // gapped but live straight potential
+  if (boardHasManyBroadwaysLocal(board)) wetnessScore += 0.5; // heavy broadway interaction
+  if (paired) {
+    // small nudge for low paired textures — can become tricky / dynamic on later streets
+    const lowPaired = Object.entries(boardRanksCount).some(([r,v]) => v>=2 && "23456789".includes(r));
+    if (lowPaired) wetnessScore += 0.5;
   }
-  if (score.cat === 2) {
+
+  // Ace‑high dryness adjustment:
+  // Only apply if A is present, board is rainbow, and there is no straight pressure.
+  // This makes classic A‑high rainbow flops (e.g., A74r) score as drier,
+  // without overpowering truly wet signals on A‑high connected/two‑tone boards.
+  const hasAce = board.some(c => c.rank === "A");
+  const suitsSet = new Set(board.map(c => c.suit));
+  const isRainbow = (board.length >= 3) && (suitsSet.size >= 3);
+  const isStatic = !connected && !fourToStraight;
+  if (hasAce && isRainbow && isStatic) {
+    wetnessScore -= 0.75;
+  }
+
+  // Bucketize
+  let moistureBucket;
+  if (wetnessScore >= 3.5) moistureBucket = "Wet";
+  else if (wetnessScore >= 2.0) moistureBucket = "Semi‑wet";
+  else if (wetnessScore >= 1.0) moistureBucket = "Semi‑dry";
+  else moistureBucket = "Dry";
+
+  // Add a visible moisture badge (colour‑coded)
+  const moistureBadgeColor =
+    moistureBucket === "Wet" ? "red" :
+    (moistureBucket === "Semi‑wet" ? "amber" : "green");
+  tags.push({ label: moistureBucket, sev: moistureBadgeColor });
+
+return {
+    warnings,
+    heroFlushDraw,
+    drawStrength,
+    tags,
+    paired,
+    mono,
+    connected,
+    fourToStraight,
+    // new:
+    wetnessScore,
+    moistureBucket
+  };
+}
+
+// ==================== Hand descriptors ====================
+function countRankIn(hole, board, rank){
+  let n=0; hole.forEach(c=>{ if (c.rank===rank) n++; }); board.forEach(c=>{ if (c.rank===rank) n++; }); return n;
+}
+function remainingOfRank(hole, board, rank){ return Math.max(0, 4 - countRankIn(hole,board,rank)); }
+
+function describeMadeHand(hole, board){
+  const score = evaluate7(hole, board);
+  if (score.cat===1){
+    const pairRank = score.ranks[0];
+    const n = Object.keys(RANK_TO_VAL).find(k=>RANK_TO_VAL[k]===pairRank);
+    return { cat: score.cat, label: `One Pair (${n})` };
+  }
+  if (score.cat===2){
     const r1 = score.ranks[0], r2 = score.ranks[1];
     const n1 = Object.keys(RANK_TO_VAL).find(k=>RANK_TO_VAL[k]===r1);
     const n2 = Object.keys(RANK_TO_VAL).find(k=>RANK_TO_VAL[k]===r2);
     return { cat: score.cat, label: `Two Pair (${n1}s & ${n2}s)` };
   }
-  if (score.cat === 3) {
+  if (score.cat===3){
     const r = score.ranks[0];
     const n = Object.keys(RANK_TO_VAL).find(k=>RANK_TO_VAL[k]===r);
     return { cat: score.cat, label: `Trips (${n}s)` };
   }
-  if (score.cat === 4) return { cat: score.cat, label: "Straight" };
-  if (score.cat === 5) return { cat: score.cat, label: "Flush" };
-  if (score.cat === 6) return { cat: score.cat, label: "Full House" };
-  if (score.cat === 7) return { cat: score.cat, label: "Quads" };
-  if (score.cat === 8) return { cat: score.cat, label: "Straight Flush" };
+  if (score.cat===4) return { cat: score.cat, label: "Straight" };
+  if (score.cat===5) return { cat: score.cat, label: "Flush" };
+  if (score.cat===6) return { cat: score.cat, label: "Full House" };
+  if (score.cat===7) return { cat: score.cat, label: "Quads" };
+  if (score.cat===8) return { cat: score.cat, label: "Straight Flush" };
   return { cat: score.cat, label: "High Card" };
 }
 
-// ====== Nuts detection ======
-function isAbsoluteNutsOnRiver(hole, board) {
-  if (board.length !== 5) return { abs:false, beaters:0 };
-  const deck = createDeck().filter(c => !containsCard(hole,c) && !containsCard(board,c));
-  const heroScore = evaluate7(hole, board);
-  let beaters = 0;
-  for (let i=0;i<deck.length;i++){
-    for (let j=i+1;j<deck.length;j++){
-      const villainScore = evaluate7([deck[i], deck[j]], board);
-      if (compareScores(heroScore, villainScore) < 0) { beaters++; if (beaters>0) break; }
-    }
-    if (beaters>0) break;
+// ===== Nuts detection =====
+function evaluate7(hole, board){
+  const cards = [...hole, ...board];
+  const byRank = new Map(); const bySuit = new Map();
+  for (const c of cards){ byRank.set(c.rank, (byRank.get(c.rank)??0)+1); bySuit.set(c.suit, (bySuit.get(c.suit)??0)+1); }
+  const rankValsDesc = [...new Set(cards.map(c=>RANK_TO_VAL[c.rank]))].sort((a,b)=>b-a);
+  const rankSet = new Set(rankValsDesc);
+
+  // Straight flush?
+  const suitWith5 = [...bySuit.entries()].find(([,cnt]) => cnt>=5)?.[0];
+  if (suitWith5){
+    const suited = cards.filter(c => c.suit===suitWith5);
+    const suitedSet = new Set([...new Set(suited.map(c=>RANK_TO_VAL[c.rank]))].sort((a,b)=>b-a));
+    const sfHigh = highestStraightHigh(suitedSet);
+    if (sfHigh) return { cat:8, ranks:[sfHigh] };
   }
-  return { abs: beaters === 0, beaters };
+  // Quads
+  const quads = [...byRank.entries()].filter(([,c])=>c===4).map(([r])=>RANK_TO_VAL[r]).sort((a,b)=>b-a);
+  if (quads.length){
+    const quad = quads[0];
+    const kicker = rankValsDesc.find(v=>v!==quad);
+    return { cat:7, ranks:[quad, kicker] };
+  }
+  // Trips / Pairs
+  const trips = [...byRank.entries()].filter(([,c])=>c===3).map(([r])=>RANK_TO_VAL[r]).sort((a,b)=>b-a);
+  const pairs = [...byRank.entries()].filter(([,c])=>c===2).map(([r])=>RANK_TO_VAL[r]).sort((a,b)=>b-a);
+
+  // Full house
+  if (trips.length && (pairs.length || trips.length>=2)){
+    const topTrips = trips[0];
+    const bestPair = (trips.length>=2) ? trips[1] : pairs[0];
+    return { cat:6, ranks:[topTrips, bestPair] };
+  }
+  // Flush
+  if (suitWith5){
+    const flushVals = [...cards.filter(c=>c.suit===suitWith5).map(c=>RANK_TO_VAL[c.rank])].sort((a,b)=>b-a).slice(0,5);
+    return { cat:5, ranks:flushVals };
+  }
+  // Straight
+  const straightHigh = highestStraightHigh(rankSet);
+  if (straightHigh) return { cat:4, ranks:[straightHigh] };
+
+  if (trips.length){
+    const t = trips[0];
+    const kickers = rankValsDesc.filter(v=>v!==t).slice(0,2);
+    return { cat:3, ranks:[t, ...kickers] };
+  }
+  if (pairs.length>=2){
+    const [p1,p2] = pairs.slice(0,2);
+    const kicker = rankValsDesc.find(v=>v!==p1 && v!==p2);
+    return { cat:2, ranks:[p1,p2,kicker] };
+  }
+  if (pairs.length===1){
+    const p = pairs[0];
+    const kickers = rankValsDesc.filter(v=>v!==p).slice(0,3);
+    return { cat:1, ranks:[p, ...kickers] };
+  }
+  return { cat:0, ranks:rankValsDesc.slice(0,5) };
 }
-function isProbableNutsPreRiver(hole, board, samples=800) {
-  if (board.length === 5) return isAbsoluteNutsOnRiver(hole, board);
-  const deck = createDeck().filter(c => !containsCard(hole,c) && !containsCard(board,c));
-  const heroScore = evaluate7(hole, board);
-  let beaters = 0;
-  for (let s=0; s<samples; s++){
-    const i = Math.floor(Math.random()*deck.length);
-    let j = Math.floor(Math.random()*deck.length);
-    if (j===i) j = (j+1) % deck.length;
-    const villainScore = evaluate7([deck[i], deck[j]], board);
-    if (compareScores(heroScore, villainScore) < 0) { beaters++; break; }
+function highestStraightHigh(rankValsSet){
+  const vals = [...rankValsSet];
+  if (rankValsSet.has(14)) vals.push(1);
+  vals.sort((a,b)=>a-b);
+  let run=1, best=0;
+  for (let i=1;i<vals.length;i++){
+    if (vals[i]===vals[i-1]) continue;
+    if (vals[i]===vals[i-1]+1){ run++; if (run>=5) best = Math.max(best, vals[i]); }
+    else run=1;
   }
-  return { abs:false, beaters, likely: beaters===0 };
+  return best;
+}
+function compareScores(a,b){
+  if (a.cat!==b.cat) return a.cat>b.cat ? 1 : -1;
+  const L = Math.max(a.ranks.length, b.ranks.length);
+  for (let i=0;i<L;i++){
+    const av = a.ranks[i] ?? 0;
+    const bv = b.ranks[i] ?? 0;
+    if (av!==bv) return av>bv ? 1 : -1;
+  }
+  return 0;
 }
 
-// ====== STRAIGHT DRAW DETECTION (fixed) ======
-/**
- * Returns { openEnder, gutshot }
- * - Open-ender = any 4 *consecutive* ranks r..r+3 present where r ∈ [2..10].
- * - Gutshot = any 5-window r..r+4 with exactly 4 present BUT not counted as OESD.
- * Also handles A-2-3-4 (needs 5) as a 4-out gutshot.
- */
-function detectStraightDrawFromAllCards(allCards) {
-  const vals = new Set(allCards.map(c => RANK_TO_VAL[c.rank])); // 2..14 only here
-  const has = v => vals.has(v);
-
-  // --- Open-ender: look for 4 consecutive ranks starting 2..10
-  let openEnder = false;
-  for (let r = 2; r <= 10; r++) {
-    if (has(r) && has(r+1) && has(r+2) && has(r+3)) { openEnder = true; break; }
+// ==================== STRAIGHT DRAW DETECTION ====================
+function detectStraightDrawFromAllCards(allCards){
+  const vals = new Set(allCards.map(c=>RANK_TO_VAL[c.rank]));
+  const has = v=>vals.has(v);
+  // Open-ender: 4 consecutive starting 2..10
+  let openEnder=false;
+  for (let r=2;r<=10;r++){
+    if (has(r)&&has(r+1)&&has(r+2)&&has(r+3)){ openEnder=true; break; }
   }
   if (openEnder) return { openEnder:true, gutshot:false };
-
-  // --- Gutshot: any 5-window with exactly 4 ranks present (not OESD)
-  let gutshot = false;
-  for (let r = 2; r <= 10; r++) {
-    let count = 0;
-    for (let k = 0; k < 5; k++) if (has(r+k)) count++;
-    if (count === 4) { gutshot = true; break; }
+  // Gutshot: any 5-window with exactly 4 ranks present
+  let gutshot=false;
+  for (let r=2;r<=10;r++){
+    let count=0; for (let k=0;k<5;k++) if (has(r+k)) count++;
+    if (count===4){ gutshot=true; break; }
   }
-  // Special wheel: A-2-3-4 (needs 5)
+  // Wheel A-2-3-4 missing 5
   if (!gutshot && has(14) && has(2) && has(3) && has(4) && !has(5)) gutshot = true;
   return { openEnder:false, gutshot };
 }
 
-// ====== Hints / Outs ======
-function estimateOuts(hole, board) {
+// ==================== Outs & Hints ====================
+function estimateOuts(hole, board){
   const stage = STAGES[currentStageIndex];
   const texture = analyzeBoard(board, hole);
-  if (stage === "river") {
-    return { strong: 0, tentative: 0, outsDetail: [], texture };
-  }
+  if (stage==="river"){ return { strong:0, tentative:0, outsDetail:[], texture }; }
 
-  let strong = 0; let tentative = 0; const outsDetail = [];
-
-  // Flush draw
+  let strong=0, tentative=0, outsDetail=[];
   const all = [...hole, ...board];
-  const suitCounts = {};
-  all.forEach(c => { suitCounts[c.suit] = (suitCounts[c.suit] ?? 0) + 1; });
-  const flushSuit = Object.keys(suitCounts).find(s => suitCounts[s] === 4);
-  if (flushSuit) {
+  const suitCounts = {}; all.forEach(c=>{ suitCounts[c.suit]=(suitCounts[c.suit]??0)+1; });
+  const flushSuit = Object.keys(suitCounts).find(s => suitCounts[s]===4);
+  if (flushSuit){
     const flushOuts = 9;
-    if (texture.mono) { // monotone board → conservative
-      tentative += flushOuts; outsDetail.push("Flush draw – 9 tentative outs (monotone board).");
-    } else if (texture.paired) {
-      strong += flushOuts; outsDetail.push("Flush draw – 9 strong outs. Note: paired board (boat/quads risk).");
-    } else {
-      strong += flushOuts; outsDetail.push("Flush draw – 9 strong outs.");
-    }
+    if (texture.mono){ tentative+=flushOuts; outsDetail.push("Flush draw – 9 tentative outs (monotone board)."); }
+    else if (texture.paired){ strong+=flushOuts; outsDetail.push("Flush draw – 9 strong outs. Note: paired board (boat/quads risk)."); }
+    else { strong+=flushOuts; outsDetail.push("Flush draw – 9 strong outs."); }
   }
-
-  // Straight draws
   const { openEnder, gutshot } = detectStraightDrawFromAllCards(all);
-  if (openEnder) {
+  if (openEnder){
     const outs = 8;
-    if (texture.mono) {
-      tentative += outs; outsDetail.push("Open‑ended straight draw – 8 tentative outs (monotone board).");
-    } else if (texture.paired) {
-      strong += outs; outsDetail.push("Open‑ended straight draw – 8 strong outs. Note: paired board (some 'dirty' outs vs trips/boats).");
-    } else {
-      strong += outs; outsDetail.push("Open‑ended straight draw – 8 strong outs.");
-    }
-  } else if (gutshot) {
-    const outs = 4;
-    if (texture.mono) {
-      tentative += outs; outsDetail.push("Gutshot straight draw – 4 tentative outs (monotone board).");
-    } else if (texture.paired) {
-      strong += outs; outsDetail.push("Gutshot straight draw – 4 strong outs. Note: paired board (dirty outs risk).");
-    } else {
-      strong += outs; outsDetail.push("Gutshot straight draw – 4 strong outs.");
-    }
+    if (texture.mono){ tentative+=outs; outsDetail.push("Open‑ended straight draw – 8 tentative outs (monotone board)."); }
+    else if (texture.paired){ strong+=outs; outsDetail.push("Open‑ended straight draw – 8 strong outs. Note: paired board."); }
+    else { strong+=outs; outsDetail.push("Open‑ended straight draw – 8 strong outs."); }
+  } else if (gutshot){
+    const outs=4;
+    if (texture.mono){ tentative+=outs; outsDetail.push("Gutshot – 4 tentative outs (monotone board)."); }
+    else if (texture.paired){ strong+=outs; outsDetail.push("Gutshot – 4 strong outs. Note: paired board."); }
+    else { strong+=outs; outsDetail.push("Gutshot – 4 strong outs."); }
   }
 
-  // Pair logic & promotions
   const r1 = hole[0].rank, r2 = hole[1].rank;
-  const holePair = (r1 === r2);
-
-  const boardCount = {};
-  board.forEach(c => { boardCount[c.rank] = (boardCount[c.rank] ?? 0) + 1; });
-
-  const r1OnBoard = boardCount[r1] ?? 0, r2OnBoard = boardCount[r2] ?? 0;
-  const havePair = holePair || r1OnBoard > 0 || r2OnBoard > 0;
-
-  if (!havePair) {
-    const outsR1 = Math.max(0, 3 - r1OnBoard);
-    const outsR2 = Math.max(0, 3 - r2OnBoard);
-    if (outsR1 > 0) { tentative += outsR1; outsDetail.push(`Overcard ${r1} pair – ${outsR1} tentative outs.`); }
-    if (outsR2 > 0) { tentative += outsR2; outsDetail.push(`Overcard ${r2} pair – ${outsR2} tentative outs.`); }
+  const holePair = (r1===r2);
+  const boardCount = {}; board.forEach(c=>{ boardCount[c.rank]=(boardCount[c.rank]??0)+1; });
+  const r1On = boardCount[r1]??0, r2On = boardCount[r2]??0;
+  const havePair = holePair || r1On>0 || r2On>0;
+  if (!havePair){
+    const outsR1 = Math.max(0, 3 - r1On);
+    const outsR2 = Math.max(0, 3 - r2On);
+    if (outsR1>0){ tentative+=outsR1; outsDetail.push(`Overcard ${r1} pair – ${outsR1} tentative outs.`); }
+    if (outsR2>0){ tentative+=outsR2; outsDetail.push(`Overcard ${r2} pair – ${outsR2} tentative outs.`); }
   }
-
-  if (havePair) {
-    const pairedRank = holePair ? r1 : (r1OnBoard > 0 ? r1 : r2);
-    const seenOnBoard = boardCount[pairedRank] ?? 0;
+  if (havePair){
+    const pairedRank = holePair ? r1 : (r1On>0 ? r1 : r2);
+    const seenOnBoard = boardCount[pairedRank]??0;
     const holeCount = holePair ? 2 : 1;
     const trips = Math.max(0, 4 - holeCount - seenOnBoard);
-    if (trips > 0) {
-      if (texture.mono || texture.fourToStraight || texture.connected || texture.paired) {
+    if (trips>0){
+      if (texture.mono || texture.fourToStraight || texture.connected || texture.paired){
         tentative += trips; outsDetail.push(`Trips (${pairedRank}) – ${trips} tentative outs (board danger).`);
       } else {
         strong += trips; outsDetail.push(`Trips (${pairedRank}) – ${trips} strong outs.`);
       }
     }
-
-    if (!holePair) {
-      const kickerRank = (pairedRank === r1 ? r2 : r1);
-      const seenKick = boardCount[kickerRank] ?? 0;
+    if (!holePair){
+      const kickerRank = (pairedRank===r1 ? r2 : r1);
+      const seenKick = boardCount[kickerRank]??0;
       const kickerOuts = Math.max(0, 3 - seenKick);
-      if (kickerOuts > 0) {
-        tentative += kickerOuts;
-        outsDetail.push(`Two‑pair via ${kickerRank} – ${kickerOuts} tentative outs.`);
-      }
+      if (kickerOuts>0){ tentative+=kickerOuts; outsDetail.push(`Two‑pair via ${kickerRank} – ${kickerOuts} tentative outs.`); }
     }
-
-    // Full-house promotions on paired boards (turn/river emphasis)
-    if ((Object.values(boardCount).some(v => v >= 2)) && board.length >= 4) {
-      const boardPairedRank = Object.keys(boardCount).find(k => (boardCount[k] ?? 0) >= 2);
-      if (boardPairedRank) {
+    if ((Object.values(boardCount).some(v=>v>=2)) && board.length>=4){
+      const boardPairedRank = Object.keys(boardCount).find(k => (boardCount[k]??0)>=2);
+      if (boardPairedRank){
         const heroPairRank = pairedRank;
         const heroBoatOuts = remainingOfRank(hole, board, heroPairRank);
-        if (heroBoatOuts > 0) {
-          strong += heroBoatOuts;
-          outsDetail.push(`Full House via ${heroPairRank} – ${heroBoatOuts} strong outs.`);
-        }
+        if (heroBoatOuts>0){ strong+=heroBoatOuts; outsDetail.push(`Full House via ${heroPairRank} – ${heroBoatOuts} strong outs.`); }
         const boardBoatOuts = remainingOfRank(hole, board, boardPairedRank);
-        if (boardBoatOuts > 0) {
-          tentative += boardBoatOuts;
-          outsDetail.push(`Full House via ${boardPairedRank} – ${boardBoatOuts} tentative outs (quads risk).`);
-        }
+        if (boardBoatOuts>0){ tentative+=boardBoatOuts; outsDetail.push(`Full House via ${boardPairedRank} – ${boardBoatOuts} tentative outs.`); }
       }
     }
   }
-
   return { strong, tentative, outsDetail, texture };
 }
 
-function updateHintsImmediate() {
+function updateHintsImmediate(){
   const stage = STAGES[currentStageIndex];
   const outsInfo = estimateOuts(holeCards, boardCards);
   const texture = outsInfo.texture;
-
-  const boardTags = (texture.tags || []).map(t => `<span class="badge ${t.sev}">${t.label}</span>`).join(' ');
+  const boardTags = (texture.tags ?? []).map(t=>`<span class="badge ${t.sev}">${t.label}</span>`).join(' ');
   const made = describeMadeHand(holeCards, boardCards);
-
   let nutsBadge = "";
-  if (boardCards.length === 5) {
+  if (boardCards.length===5){
+    // absolute nuts check (fast bail-out): sample-free quick check via scanning remaining deck
     const nuts = isAbsoluteNutsOnRiver(holeCards, boardCards);
     nutsBadge = nuts.abs ? `<span class="badge green">NUTS</span>` : `<span class="badge amber">Not nuts</span>`;
-  } else if (boardCards.length >= 3) {
+  } else if (boardCards.length>=3){
     const prob = isProbableNutsPreRiver(holeCards, boardCards, 800);
     nutsBadge = prob.likely ? `<span class="badge green">Likely Nuts</span>` : `<span class="badge amber">Beatable</span>`;
   }
-
   const totalOuts = outsInfo.strong + outsInfo.tentative;
-  let approxEquity = null;
-  if (stage === "flop") approxEquity = totalOuts * 4;
-  if (stage === "turn") approxEquity = totalOuts * 2;
-
+  let approxEquity=null;
+  if (stage==="flop") approxEquity = totalOuts*4;
+  if (stage==="turn") approxEquity = totalOuts*2;
   const outsLines = [];
   outsLines.push(`<div><strong>Strong outs:</strong> ${outsInfo.strong}</div>`);
   outsLines.push(`<div><strong>Tentative outs:</strong> ${outsInfo.tentative}</div>`);
-  if (totalOuts > 0 && approxEquity !== null) {
+  if (totalOuts>0 && approxEquity!==null){
     outsLines.push(`<div>4 & 2 rule → approx <strong>${approxEquity.toFixed(1)}%</strong></div>`);
   }
-  if (outsInfo.outsDetail.length > 0) {
-    outsLines.push(`<div style="opacity:.9">${outsInfo.outsDetail.join(" ")}</div>`);
-  }
+  if (outsInfo.outsDetail.length>0){ outsLines.push(`<div style="opacity:.9">${outsInfo.outsDetail.join(" ")}</div>`); }
 
   const examplePotOdds = computePotOdds(pot, toCall);
-  const potLine = (stage !== "river")
+  const potLine = (stage!=="river")
     ? `<div>£${toCall.toFixed(0)} to call into £${pot.toFixed(0)} → Pot odds <strong>${examplePotOdds.toFixed(1)}%</strong></div>`
     : ``;
 
-  // Summary (short, for mobile)
+  const boardLine = `<span id="boardBadgeBar" class="board-badges" title="Tap for c-bet guide">${boardTags || '<span class="badge green">Stable</span>'}</span>`;
   const summaryHtml = `
-    <div><strong>Board:</strong> ${boardTags || '<span class="badge green">Stable</span>'}</div>
+    <div><strong>Board:</strong> ${boardLine}</div>
     <div><strong>Made:</strong> ${made.label} ${nutsBadge}</div>
-    <div><strong>Outs:</strong> ${outsInfo.strong} strong${outsInfo.tentative?`, ${outsInfo.tentative} tentative`:''}${(approxEquity!=null && (outsInfo.strong+outsInfo.tentative)>0)?` · ~${approxEquity.toFixed(1)}%`:""}</div>
+    <div><strong>Outs:</strong> ${outsInfo.strong} strong${outsInfo.tentative?`, ${outsInfo.tentative} tentative`:''}${(approxEquity!=null && totalOuts>0)?` · ~${approxEquity.toFixed(1)}%`:""}</div>
   `;
-
-  // Details (collapsible)
   const detailsHtml = `
     <div style="display:flex;flex-direction:column;gap:6px">
       ${outsLines.join("")}
       ${potLine}
     </div>
   `;
-
-  if (difficulty === "beginner" || difficulty === "intermediate") {
+  if (difficulty==="beginner" || difficulty==="intermediate"){
     hintsEl.innerHTML = summaryHtml;
     if (hintsDetailBody) hintsDetailBody.innerHTML = detailsHtml;
     if (hintDetails) hintDetails.open = false;
@@ -531,7 +566,36 @@ function updateHintsImmediate() {
   }
 }
 
-// ====== Scenarios ======
+function isAbsoluteNutsOnRiver(hole, board){
+  if (board.length!==5) return { abs:false, beaters:0 };
+  const rest = createDeck().filter(c => !containsCard(hole,c) && !containsCard(board,c));
+  const heroScore = evaluate7(hole, board);
+  let beaters=0;
+  for (let i=0;i<rest.length;i++){
+    for (let j=i+1;j<rest.length;j++){
+      const villainScore = evaluate7([rest[i], rest[j]], board);
+      if (compareScores(heroScore, villainScore)<0){ beaters++; if (beaters>0) break; }
+    }
+    if (beaters>0) break;
+  }
+  return { abs: beaters===0, beaters };
+}
+function isProbableNutsPreRiver(hole, board, samples=800){
+  if (board.length===5) return isAbsoluteNutsOnRiver(hole,board);
+  const rest = createDeck().filter(c => !containsCard(hole,c) && !containsCard(board,c));
+  const heroScore = evaluate7(hole,board);
+  let beaters=0;
+  for (let s=0;s<samples;s++){
+    const i = Math.floor(Math.random()*rest.length);
+    let j = Math.floor(Math.random()*rest.length);
+    if (j===i) j = (j+1)%rest.length;
+    const villainScore = evaluate7([rest[i],rest[j]], board);
+    if (compareScores(heroScore, villainScore)<0){ beaters++; break; }
+  }
+  return { abs:false, beaters, likely: beaters===0 };
+}
+
+// ==================== Scenarios (street bet sizing noise) ====================
 const SCENARIOS = [
   { label: "Strong hand slow play", potFactor: 0.3 },
   { label: "Drawing hand stab", potFactor: 0.6 },
@@ -539,112 +603,21 @@ const SCENARIOS = [
   { label: "Weird small bet", potFactor: 0.2 },
   { label: "Overbet pressure", potFactor: 1.5 }
 ];
-function randomScenario() {
-  const idx = Math.floor(Math.random() * SCENARIOS.length);
+function randomScenario(){
+  const idx = Math.floor(Math.random()*SCENARIOS.length);
   return SCENARIOS[idx];
 }
 
-// ====== Equity & pot odds ======
-function containsCard(list, card) { return list.some(c => c.rank === card.rank && c.suit === card.suit); }
-function byDesc(a,b){ return b - a; }
-function getCountsByRank(cards){ const m = new Map(); for (const c of cards) m.set(c.rank, (m.get(c.rank) ?? 0)+1); return m; }
-function getCountsBySuit(cards){ const m = new Map(); for (const c of cards) m.set(c.suit, (m.get(c.suit) ?? 0)+1); return m; }
-function ranksDesc(cards){ return cards.map(c=>RANK_TO_VAL[c.rank]).sort(byDesc); }
-function uniqueRanksDesc(cards){ return [...new Set(cards.map(c=>RANK_TO_VAL[c.rank]))].sort(byDesc); }
-function highestStraightHigh(rankValsSet){
-  const vals = [...rankValsSet];
-  if (rankValsSet.has(14)) vals.push(1);
-  vals.sort((a,b)=>a-b);
-  let run=1, best=0;
-  for (let i=1;i<vals.length;i++){
-    if (vals[i] === vals[i-1]) continue;
-    if (vals[i] === vals[i-1] + 1){ run++; if (run >= 5) best = Math.max(best, vals[i]); }
-    else { run = 1; }
-  }
-  return best;
-}
-/** Evaluate best 5-card hand from 7 cards. */
-function evaluate7(hole, board){
-  const cards = [...hole, ...board];
-  const byRank = getCountsByRank(cards);
-  const bySuit = getCountsBySuit(cards);
-  const rankValsDesc = uniqueRanksDesc(cards);
-  const rankSet = new Set(rankValsDesc);
-
-  const suitWith5 = [...bySuit.entries()].find(([,cnt]) => cnt >= 5)?.[0];
-  if (suitWith5){
-    const suited = cards.filter(c => c.suit === suitWith5);
-    const suitedSet = new Set(uniqueRanksDesc(suited));
-    const sfHigh = highestStraightHigh(suitedSet);
-    if (sfHigh) return { cat:8, ranks:[sfHigh] };
-  }
-
-  const quads = [...byRank.entries()].filter(([,c]) => c===4).map(([r])=>RANK_TO_VAL[r]).sort(byDesc);
-  if (quads.length){
-    const quad = quads[0];
-    const kicker = rankValsDesc.find(v => v !== quad);
-    return { cat:7, ranks:[quad, kicker] };
-  }
-
-  const trips = [...byRank.entries()].filter(([,c]) => c===3).map(([r])=>RANK_TO_VAL[r]).sort(byDesc);
-  const pairs = [...byRank.entries()].filter(([,c]) => c===2).map(([r])=>RANK_TO_VAL[r]).sort(byDesc);
-
-  // Full house: trips + (pair OR second trips)
-  if (trips.length && (pairs.length || trips.length >= 2)){
-    const topTrips = trips[0];
-    const bestPair = (trips.length >= 2) ? trips[1] : pairs[0];
-    return { cat:6, ranks:[topTrips, bestPair] };
-  }
-
-  if (suitWith5){
-    const flushVals = ranksDesc(cards.filter(c=>c.suit===suitWith5)).slice(0,5);
-    return { cat:5, ranks:flushVals };
-  }
-
-  const straightHigh = highestStraightHigh(rankSet);
-  if (straightHigh) return { cat:4, ranks:[straightHigh] };
-
-  if (trips.length){
-    const t = trips[0];
-    const kickers = rankValsDesc.filter(v=>v!==t).slice(0,2);
-    return { cat:3, ranks:[t, ...kickers] };
-  }
-
-  if (pairs.length >= 2){
-    const [p1, p2] = pairs.slice(0,2);
-    const kicker = rankValsDesc.find(v => v !== p1 && v !== p2);
-    return { cat:2, ranks:[p1, p2, kicker] };
-  }
-
-  if (pairs.length === 1){
-    const p = pairs[0];
-    const kickers = rankValsDesc.filter(v=>v!==p).slice(0,3);
-    return { cat:1, ranks:[p, ...kickers] };
-  }
-
-  return { cat:0, ranks:rankValsDesc.slice(0,5) };
-}
-function compareScores(a,b){
-  if (a.cat !== b.cat) return a.cat > b.cat ? 1 : -1;
-  const L = Math.max(a.ranks.length, b.ranks.length);
-  for (let i=0;i<L;i++){
-    const av = a.ranks[i] ?? 0;
-    const bv = b.ranks[i] ?? 0;
-    if (av !== bv) return av > bv ? 1 : -1;
-  }
-  return 0;
-}
-function computePotOdds(pot, callAmount) { if (callAmount <= 0) return 0; return (callAmount / (pot + callAmount)) * 100; }
+// ==================== Equity simulation ====================
 const CAT_NAME = {
   8:'Straight Flush', 7:'Four of a Kind', 6:'Full House',
   5:'Flush', 4:'Straight', 3:'Three of a Kind',
   2:'Two Pair', 1:'One Pair', 0:'High Card'
 };
 
-// ====== REALISM & PERFORMANCE SETTINGS ======
 const SETTINGS = {
   sim: {
-    playersBaseline: 4,
+    playersBaseline: 5,
     continueRate: { flop: 0.65, turn: 0.55, river: 0.45 },
     rangeAwareContinuation: true,
     minShowdownOpponents: 1
@@ -658,254 +631,1203 @@ const SETTINGS = {
   trialsByStage: { preflop: 4000, flop: 6000, turn: 8000, river: 12000 }
 };
 const TRIALS_PRESETS = {
-  Mobile:   { preflop: 2000, flop: 4000, turn: 6000, river: 8000 },
+  Mobile: { preflop: 2000, flop: 4000, turn: 6000, river: 8000 },
   Balanced: { preflop: 4000, flop: 6000, turn: 8000, river: 12000 },
   Accurate: { preflop: 8000, flop: 12000, turn: 16000, river: 20000 }
 };
 
-// ====== Simulation helpers ======
-function popRandomCard(arr) { const i = Math.floor(Math.random() * arr.length); return arr.splice(i, 1)[0]; }
-function preflopWeight(c1, c2) {
-  const v1 = RANK_TO_VAL[c1.rank], v2 = RANK_TO_VAL[c2.rank];
-  const hi = Math.max(v1, v2), lo = Math.min(v1, v2);
-  let score = 0;
-  if (hi >= 12) score += 1.0;
-  if (lo >= 11) score += 0.7;
-  else if (lo >= 10) score += 0.5;
-  if (v1 === v2) { score += 0.9; if (hi >= 10) score += 0.1; }
-  if (c1.suit === c2.suit) score += 0.25;
-  const gap = Math.abs(v1 - v2);
-  if (gap === 1) score += 0.15;
-  else if (gap === 2) score += 0.07;
-  const maxScore = 3.0, base = 0.05;
-  return Math.min(1, base + (score / maxScore) * (1 - base));
+function popRandomCard(arr){ const i=Math.floor(Math.random()*arr.length); return arr.splice(i,1)[0]; }
+function preflopWeight(c1,c2){
+  const v1=RANK_TO_VAL[c1.rank], v2=RANK_TO_VAL[c2.rank];
+  const hi=Math.max(v1,v2), lo=Math.min(v1,v2);
+  let score=0;
+  if (hi>=12) score+=1.0;
+  if (lo>=11) score+=0.7; else if (lo>=10) score+=0.5;
+  if (v1===v2){ score+=0.9; if (hi>=10) score+=0.1; }
+  if (c1.suit===c2.suit) score+=0.25;
+  const gap = Math.abs(v1-v2);
+  if (gap===1) score+=0.15; else if (gap===2) score+=0.07;
+  const maxScore=3.0, base=0.05;
+  return Math.min(1, base + (score/maxScore)*(1-base));
 }
-function drawBiasedOpponentHand(deck) {
-  const maxTries = 200;
-  for (let tries = 0; tries < maxTries; tries++) {
-    const i = Math.floor(Math.random() * deck.length);
-    let j = Math.floor(Math.random() * deck.length);
-    if (j === i) continue;
-    const c1 = deck[i], c2 = deck[j];
-    if (Math.random() <= preflopWeight(c1, c2)) {
-      const hi = Math.max(i, j), lo = Math.min(i, j);
-      const second = deck.splice(hi, 1)[0];
-      const first = deck.splice(lo, 1)[0];
-      return [first, second];
+function drawBiasedOpponentHand(d){
+  const maxTries=200;
+  for (let t=0;t<maxTries;t++){
+    const i = Math.floor(Math.random()*d.length);
+    let j = Math.floor(Math.random()*d.length);
+    if (j===i) continue;
+    const c1=d[i], c2=d[j];
+    if (Math.random()<=preflopWeight(c1,c2)){
+      const hi=Math.max(i,j), lo=Math.min(i,j);
+      const second = d.splice(hi,1)[0];
+      const first  = d.splice(lo,1)[0];
+      return [first,second];
     }
   }
-  return [popRandomCard(deck), popRandomCard(deck)];
+  return [popRandomCard(d), popRandomCard(d)];
 }
-function stageFromBoard(board) {
-  if (!board || board.length === 0) return "preflop";
-  if (board.length === 3) return "flop";
-  if (board.length === 4) return "turn";
+function stageFromBoard(board){
+  if (!board || board.length===0) return "preflop";
+  if (board.length===3) return "flop";
+  if (board.length===4) return "turn";
   return "river";
 }
-function villainConnected(hole, boardAtStreet) {
+function villainConnected(hole, boardAtStreet){
   const all = [...hole, ...boardAtStreet];
-  const suitCounts = {}; all.forEach(c => { suitCounts[c.suit] = (suitCounts[c.suit] ?? 0) + 1; });
-  const hasFD = Object.values(suitCounts).some(v => v === 4);
-
-  const byRankBoard = {}; boardAtStreet.forEach(c => { byRankBoard[c.rank] = (byRankBoard[c.rank] ?? 0) + 1; });
-  const pairWithBoard =
-    (byRankBoard[hole[0].rank] > 0) ||
-    (byRankBoard[hole[1].rank] > 0) ||
-    (hole[0].rank === hole[1].rank);
-
-  const RVAL = c => RANK_TO_VAL[c.rank];
-  const vals = new Set(all.map(RVAL)); if (vals.has(14)) vals.add(1);
-  let oesd = false;
-  for (let start = 1; start <= 10; start++) {
-    const w = [start,start+1,start+2,start+3,start+4];
-    const present = w.map(v => vals.has(v));
+  const suitCounts = {}; all.forEach(c=>{ suitCounts[c.suit]=(suitCounts[c.suit]??0)+1; });
+  const hasFD = Object.values(suitCounts).some(v=>v===4);
+  const byRankB = {}; boardAtStreet.forEach(c=>{ byRankB[c.rank]=(byRankB[c.rank]??0)+1; });
+  const pairWithBoard = byRankB[hole[0].rank]>0 || byRankB[hole[1].rank]>0 || (hole[0].rank===hole[1].rank);
+  const vals = new Set(all.map(c=>RANK_TO_VAL[c.rank])); if (vals.has(14)) vals.add(1);
+  let oesd=false;
+  for (let start=1; start<=10; start++){
+    const w=[start,start+1,start+2,start+3,start+4];
+    const present = w.map(v=>vals.has(v));
     const cnt = present.filter(Boolean).length;
-    if (cnt === 4 && (present[0] === false || present[4] === false)) { oesd = true; break; }
-    if (cnt >= 5) break;
+    if (cnt===4 && (!present[0] || !present[4])) { oesd=true; break; }
+    if (cnt>=5) break;
   }
   return pairWithBoard || hasFD || oesd;
 }
-function sampleShowdownOpponents(baselineCount, board, maybeOppHands, maybeDeck) {
+function sampleShowdownOpponents(baselineCount, board, maybeOppHands, maybeDeck){
   const stage = stageFromBoard(board);
   const rates = SETTINGS.sim.continueRate;
-
   const oppHands = maybeOppHands || [];
-  const deck = maybeDeck;
-
-  function effectiveKeepProbFor(opIdx, street) {
+  const d = maybeDeck;
+  function effectiveKeepProbFor(opIdx, street){
     let p = rates[street];
-    if (SETTINGS.sim.rangeAwareContinuation && oppHands[opIdx] && deck) {
+    if (SETTINGS.sim.rangeAwareContinuation && oppHands[opIdx] && d){
       const boardAtStreet =
-        street === 'flop' ? (board.length >= 3 ? board.slice(0,3) : [deck[0], deck[1], deck[2]]) :
-        street === 'turn' ? (board.length >= 4 ? board.slice(0,4) : (board.length === 3 ? [...board, deck[0]] : [])) :
-        street === 'river' ? (board.length >= 5 ? board.slice(0,5) : (board.length === 4 ? [...board, deck[0]] : [])) :
+        street==='flop' ? (board.length>=3 ? board.slice(0,3) : [d[0],d[1],d[2]]) :
+        street==='turn' ? (board.length>=4 ? board.slice(0,4) : (board.length===3 ? [...board, d[0]] : [])) :
+        street==='river' ? (board.length>=5 ? board.slice(0,5) : (board.length===4 ? [...board, d[0]] : [])) :
         [];
-      if (boardAtStreet.length >= 3) {
+      if (boardAtStreet.length>=3){
         const connected = villainConnected(oppHands[opIdx], boardAtStreet);
-        if (connected) p = Math.min(0.95, p + 0.25);
+        if (connected) p = Math.min(0.95, p+0.25);
       }
     }
     return Math.max(0, Math.min(1, p));
   }
-
   const survivors = [];
-  for (let i = 0; i < baselineCount; i++) {
-    let alive = true;
-    if (stage === 'preflop') {
-      alive = (Math.random() < effectiveKeepProbFor(i,'flop')) &&
-              (Math.random() < effectiveKeepProbFor(i,'turn')) &&
-              (Math.random() < effectiveKeepProbFor(i,'river'));
-    } else if (stage === 'flop') {
-      alive = (Math.random() < effectiveKeepProbFor(i,'turn')) &&
-              (Math.random() < effectiveKeepProbFor(i,'river'));
-    } else if (stage === 'turn') {
-      alive = (Math.random() < effectiveKeepProbFor(i,'river'));
-    } else {
-      alive = true;
-    }
+  for (let i=0;i<baselineCount;i++){
+    let alive=true;
+    if (stage==='preflop'){
+      alive = (Math.random()<effectiveKeepProbFor(i,'flop')) &&
+              (Math.random()<effectiveKeepProbFor(i,'turn')) &&
+              (Math.random()<effectiveKeepProbFor(i,'river'));
+    } else if (stage==='flop'){
+      alive = (Math.random()<effectiveKeepProbFor(i,'turn')) &&
+              (Math.random()<effectiveKeepProbFor(i,'river'));
+    } else if (stage==='turn'){
+      alive = (Math.random()<effectiveKeepProbFor(i,'river'));
+    } else alive = true;
     if (alive) survivors.push(i);
   }
-  while (survivors.length < SETTINGS.sim.minShowdownOpponents && survivors.length < baselineCount) {
+  while (survivors.length < SETTINGS.sim.minShowdownOpponents && survivors.length < baselineCount){
     const cand = survivors.length;
     if (!survivors.includes(cand)) survivors.push(cand);
   }
   return survivors;
 }
-/** Monte‑Carlo equity with survival to showdown and per‑street trials. */
-function computeEquityStats(hole, board) {
+function computeEquityStats(hole, board){
   const stage = stageFromBoard(board);
   const trials = SETTINGS.trialsByStage[stage] ?? 4000;
   const BASE_OPP = SETTINGS.sim.playersBaseline;
-
-  let wins=0, ties=0, losses=0;
-  let equityAcc = 0;
+  let wins=0, ties=0, losses=0; let equityAcc=0;
   const catCount = new Map();
 
-  for (let t = 0; t < trials; t++) {
+  for (let t=0;t<trials;t++){
     const simDeck = createDeck().filter(c => !containsCard(hole,c) && !containsCard(board,c));
     const opponents = [];
-    for (let i = 0; i < BASE_OPP; i++) opponents.push(drawBiasedOpponentHand(simDeck));
-
+    for (let i=0;i<BASE_OPP;i++) opponents.push(drawBiasedOpponentHand(simDeck));
     const survivorsIdx = sampleShowdownOpponents(BASE_OPP, board, opponents, simDeck);
     const survivors = survivorsIdx.map(i => opponents[i]);
-    if (survivors.length === 0 && BASE_OPP > 0) {
-      survivors.push(opponents[0]);
-    }
+    if (survivors.length===0 && BASE_OPP>0) survivors.push(opponents[0]);
 
-    const need = 5 - board.length;
+    const need = 5-board.length;
     const simBoard = [...board];
-    for (let i = 0; i < need; i++) simBoard.push(popRandomCard(simDeck));
+    for (let i=0;i<need;i++) simBoard.push(popRandomCard(simDeck));
 
     const heroScore = evaluate7(hole, simBoard);
-    let better = 0, equal = 0;
-    for (let i = 0; i < survivors.length; i++) {
+    let better=0, equal=0;
+    for (let i=0;i<survivors.length;i++){
       const villainScore = evaluate7(survivors[i], simBoard);
       const cmp = compareScores(heroScore, villainScore);
-      if (cmp < 0) better++;
-      else if (cmp === 0) equal++;
+      if (cmp<0) better++;
+      else if (cmp===0) equal++;
     }
-    if (better > 0) { losses++; }
-    else if (equal > 0) { ties++; equityAcc += 1/(equal+1); }
+    if (better>0) losses++;
+    else if (equal>0){ ties++; equityAcc += 1/(equal+1); }
     else { wins++; equityAcc += 1; }
 
     const cat = CAT_NAME[heroScore.cat];
-    catCount.set(cat, (catCount.get(cat) ?? 0) + 1);
+    catCount.set(cat, (catCount.get(cat)??0)+1);
   }
 
-  const winPct = (wins/trials)*100, tiePct = (ties/trials)*100, losePct = (losses/trials)*100;
+  const winPct = (wins/trials)*100, tiePct=(ties/trials)*100, losePct=(losses/trials)*100;
   const equity = (equityAcc/trials)*100;
-
-  const catBreakdown = [];
-  for (const [k,v] of catCount.entries()) { catBreakdown.push({ name:k, pct:(v/trials)*100 }); }
+  const catBreakdown=[];
+  for (const [k,v] of catCount.entries()) catBreakdown.push({ name:k, pct:(v/trials)*100 });
   const catOrder = ['Straight Flush','Four of a Kind','Full House','Flush','Straight','Three of a Kind','Two Pair','One Pair','High Card'];
-  catBreakdown.sort((a,b)=>{ const oi = catOrder.indexOf(a.name) - catOrder.indexOf(b.name); return oi !== 0 ? oi : b.pct - a.pct; });
-
+  catBreakdown.sort((a,b)=>{ const oi = catOrder.indexOf(a.name)-catOrder.indexOf(b.name); return oi!==0?oi:(b.pct-a.pct); });
   return { equity, winPct, tiePct, losePct, trials, catBreakdown, numOpp: Math.max(1, SETTINGS.sim.playersBaseline) };
 }
 
-// ====== Scoring ======
-function bandForError(error) {
-  const absErr = Math.abs(error);
-  if (absErr <= 5) return "green";
-  if (absErr <= 12) return "amber";
+// ==================== Scoring & decisions ====================
+function bandForError(error){
+  const absErr=Math.abs(error);
+  if (absErr<=5) return "green";
+  if (absErr<=12) return "amber";
   return "red";
 }
-function decisionBand(equity, potOdds, decision) {
+function decisionBand(equity, potOdds, decision){
   const diff = equity - potOdds;
   const margin = 4;
   let correctDecision;
-  if (diff > margin) { correctDecision = (decision === "call" || decision === "raise"); }
-  else if (diff < -margin) { correctDecision = (decision === "fold"); }
+  if (diff>margin){ correctDecision = decision==="call" || decision==="raise"; }
+  else if (diff<-margin){ correctDecision = decision==="fold"; }
   else { return "amber"; }
   return correctDecision ? "green" : "red";
 }
 
-// ====== Hand flow ======
-function startNewHand() {
+// ==================== Phase 1: Position, PFR, preflop heatmap ====================
+const POSITIONS6 = ["UTG","HJ","CO","BTN","SB","BB"];
+let heroPosIdx = 0;
+let preflopAggressor = null;
+let dealtHandStr = "";
+
+const heroActions = {
+  preflop: { action:null, sizeBb:null },
+  flop:    { action:null, sizePct:null, cbet:null },
+  turn:    { action:null, sizePct:null, barrel:null },
+  river:   { action:null, sizePct:null, barrel:null }
+};
+
+// DOM for Phase 1/2/4
+const positionDisc = document.getElementById('positionDisc');
+const preflopRangeBadge = document.getElementById('preflopRangeBadge');
+const sizePresetRow = document.getElementById('sizePresetRow');
+const sizePresetRowPost = document.getElementById('sizePresetRowPost');
+
+const rangeModalOverlay = document.getElementById('rangeModalOverlay');
+const rangeModalClose = document.getElementById('rangeModalClose');
+const rangeModalBody = document.getElementById('rangeModalBody');
+
+const guideModalOverlay = document.getElementById('guideModalOverlay');
+const guideModalClose   = document.getElementById('guideModalClose');
+const guideModalBody    = document.getElementById('guideModalBody');
+
+const posPopover = document.getElementById('posPopover');
+
+const POS_ONE_LINERS = {
+  UTG: "Under The Gun — earliest preflop, often out of position postflop.",
+  HJ:  "Hi-Jack — mid-late seat; stronger than UTG, weaker than CO/BTN.",
+  CO:  "Cutoff — late position; play wider, pressure blinds.",
+  BTN: "Button — last to act postflop; biggest positional edge.",
+  SB:  "Small Blind — invested but out of position; tighten up opens.",
+  BB:  "Big Blind — closes preflop action; defend wide vs small opens."
+};
+
+// Hybrid ranges (Open)
+const RANKS_ASC = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"];
+const RANK_INDEX = Object.fromEntries(RANKS_ASC.map((r,i)=>[r,i]));
+const HYBRID_RANGES = {
+  UTG: { open:["TT+","AQs+","AKo","KQs"], mix:["AJs","99"] },
+  HJ:  { open:["99+","AJs+","AQo+","ATs-A5s","KQs","KJs","QJs","T9s","98s","KQo"], mix:[] },
+  CO:  { open:["88+","A9s-A2s","KTs+","QTs+","JTs-T8s","97s","AJo","KJo","KQo","QJo"], mix:[] },
+  BTN: { open:["22+","A2s+","K9s+","Q9s+","J9s+","T9s-54s","A2o+","KTo+","QTo+","JTo"], mix:[] },
+  SB:  { open:["22+","A2s+","K9s+","Q9s+","J9s+","T9s-65s","A2o+","KTo+","QTo+","JTo"], mix:[] }
+};
+
+// Use explicit open sets first; if a seat isn't explicitly defined, fall back to hybrid tokens.
+function getClassMapForSeat(seat){
+  const exp = EXPLICIT_OPEN?.[seat];
+  if (exp && (exp.OPEN_GREEN?.size || exp.OPEN_AMBER?.size)) {
+    const map = new Map();
+    for (let i = 0; i < RANKS_ASC.length; i++) {
+      for (let j = 0; j < RANKS_ASC.length; j++) {
+        const r1 = RANKS_ASC[i], r2 = RANKS_ASC[j];
+        let code;
+        if (i === j) code = r1 + r2;
+        else if (i < j) code = r1 + r2 + 's';
+        else code = r2 + r1 + 'o';
+        let cls = 'fold';
+        if (exp.OPEN_GREEN?.has(code)) cls = 'open';
+        else if (exp.OPEN_AMBER?.has(code)) cls = 'mix';
+        map.set(code, cls);
+      }
+    }
+    return map;
+  }
+  // Fallback to your hybrid token-driven masks
+  return buildClassMapForPos(seat);
+}
+
+/* ============================================================
+   EXPLICIT OPEN RANGES (RFI • 6-max • ~100bb) — GREEN / AMBER
+   - GREEN = pure/mostly-pure opens
+   - AMBER = mixed / low-frequency opens (kept from earlier suggestion)
+   - Built with deterministic helpers (no regex/token parsing).
+   Paste this right under your // Hybrid ranges (Open) section.
+   ============================================================ */
+
+// ---------- Helpers (deterministic) ----------
+const BW = ["A","K","Q","J","T"]; // broadway ranks
+function rIdx(r){ return RANKS_ASC.indexOf(r); } // smaller index = stronger (A=0 ... 2=12)
+
+// Add AA..minPair (e.g., minPair='2' or '22' -> down to 22)
+function addPairs(set, minPair="22"){
+  const min = (minPair.length===2 ? minPair[0] : minPair);
+  const stop = rIdx(min);
+  for (let i=0; i<=stop; i++) {
+    const rr = RANKS_ASC[i];
+    set.add(rr+rr);
+  }
+}
+
+// Add all suited broadways (AKs, AQs, ..., KQs, KJs, ..., QJs, QTs, JTs)
+function addAllSuitedBroadways(set){
+  for (let i=0;i<BW.length;i++){
+    for (let j=i+1;j<BW.length;j++){
+      set.add(BW[i] + BW[j] + 's');
+    }
+  }
+}
+// Add all offsuit broadways (AKo, AQo, ..., JTo)
+function addAllOffsuitBroadways(set){
+  for (let i=0;i<BW.length;i++){
+    for (let j=i+1;j<BW.length;j++){
+      set.add(BW[i] + BW[j] + 'o');
+    }
+  }
+}
+// Add specific offsuit broadway minima, e.g., KTo+, QTo+, JTo (used for SB/BB text)
+function addMostOffsuitBroadways_KTo_QTo_JTo(set){
+  set.add("KTo"); set.add("KJo"); set.add("KQo");
+  set.add("QTo"); set.add("QJo");
+  set.add("JTo");
+}
+// Add offsuit ATo+ (ATo, AJo, AQo, AKo)
+function addAToPlus(set){
+  set.add("ATo"); set.add("AJo"); set.add("AQo"); set.add("AKo");
+}
+// Add offsuit A2o+ up to AKo
+function addA2oPlus(set){
+  for (let i=rIdx("K"); i<=rIdx("2"); i++){ // K..2 (descending indices)
+    const lo = RANKS_ASC[i];
+    set.add("A" + lo + "o");
+    if (lo==="K") break; // stops at AKo
+  }
+}
+// Add offsuit A8o+ (A8o..AKo)
+function addA8oPlus(set){
+  for (let i=rIdx("K"); i<=rIdx("8"); i++){
+    const lo = RANKS_ASC[i];
+    set.add("A" + lo + "o");
+    if (lo==="K") break;
+  }
+}
+// Add suited A2s..A5s
+function addA2s_to_A5s(set){
+  ["5","4","3","2"].forEach(lo => set.add("A"+lo+"s"));
+}
+// Add all suited Axs (A2s..AKs)
+function addAllAxs(set){
+  for (let i=rIdx("K"); i<=rIdx("2"); i++){
+    const lo = RANKS_ASC[i];
+    set.add("A" + lo + "s");
+    if (lo==="K") break; // done at AKs
+  }
+}
+
+// Suited connectors inclusive range, e.g., T9s–54s; or down to 32s
+function addSuitedConnectorsRange(set, start="T9", end="54"){
+  const sHi = start[0], sLo = start[1];
+  const eHi = end[0],   eLo = end[1];
+  // Validate adjacency (connector = next rank down)
+  let iStart = rIdx(sHi), iEnd = rIdx(eHi);
+  for (let i=iStart; i<=rIdx("3"); i++){ // walk down until 32
+    const hi = RANKS_ASC[i], lo = RANKS_ASC[i+1];
+    if (!lo) break;
+    set.add(hi + lo + 's');
+    if (hi===eHi && lo===eLo) break;
+  }
+}
+// Suited gappers inclusive range, e.g., 97s–64s (one-gap)
+function addSuitedGappersRange(set, startHi="9", endHi="6"){
+  let iStart = rIdx(startHi), iEnd = rIdx(endHi);
+  for (let i=iStart; i<=iEnd; i++){
+    const hi = RANKS_ASC[i], mid = RANKS_ASC[i+1], lo = RANKS_ASC[i+2];
+    if (!lo) break;
+    set.add(hi + lo + 's'); // e.g., 9 & 7 => "97s"
+  }
+}
+// Suited connectors down to a low pair like "32s" (T9s..32s)
+function addSuitedConnectorsDownTo(set, end="32"){
+  const eHi = end[0], eLo = end[1];
+  for (let i=rIdx("T"); i<=rIdx("3"); i++){
+    const hi = RANKS_ASC[i], lo = RANKS_ASC[i+1];
+    if (!lo) break;
+    set.add(hi + lo + 's');
+    if (hi===eHi && lo===eLo) break;
+  }
+}
+// Convenience: add explicit offsuit connectors list
+function addOffsuitConnectorsList(set, codes=["T9o","98o","87o"]){
+  codes.forEach(c => set.add(c));
+}
+
+// ---------- Build explicit GREEN/AMBER per seat from your spec ----------
+// We keep the AMBER suggestions we used earlier, then remove any overlap with GREEN.
+const EXPLICIT_OPEN = {
+  UTG: {
+    OPEN_GREEN: (()=>{ // ~14–16%
+      const g = new Set();
+      addPairs(g, "22");                         // 22+
+      // Broadways (offsuit): AJo+, KQo
+      g.add("AJo"); g.add("AQo"); g.add("AKo"); g.add("KQo");
+      // Suited broadways: ATs+, KTs+, QTs+, JTs
+      ["T","J","Q","K"].forEach(lo => g.add("A"+lo+"s")); // ATs..AKs
+      g.add("KTs"); g.add("KJs"); g.add("KQs");
+      g.add("QTs"); g.add("QJs");
+      g.add("JTs");
+      // Suited Aces: A2s–A5s
+      addA2s_to_A5s(g);
+      // Suited connectors: 98s, 87s, 76s
+      ["98s","87s","76s"].forEach(c=>g.add(c));
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["A5s","A4s","KJs","QJs","KQo"]) // earlier amber (dup will be removed below)
+  },
+
+  HJ: {
+    OPEN_GREEN: (()=>{ // ~18–20%
+      const g = new Set();
+      addPairs(g, "22");
+      // Broadways
+      addAToPlus(g);                 // ATo+
+      g.add("KJo"); g.add("KQo");    // KJo+
+      g.add("QJo");                  // QJo
+      ["T","J","Q","K"].forEach(lo => g.add("A"+lo+"s")); // ATs+
+      g.add("KTs"); g.add("KJs"); g.add("KQs");
+      g.add("QTs"); g.add("QJs");
+      g.add("JTs");
+      // Suited Aces: A2s–A5s
+      addA2s_to_A5s(g);
+      // Suited connectors: T9s–65s
+      addSuitedConnectorsRange(g, "T9", "65");
+      // Suited gappers: 97s, 86s
+      ["97s","86s"].forEach(c=>g.add(c));
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["A4s","A3s","A2s","KTs","QTs","JTs","97s","87s","76s","AJo"])
+  },
+
+  CO: {
+    OPEN_GREEN: (()=>{ // ~26–28%
+      const g = new Set();
+      addPairs(g, "22");
+      // Broadways: ATo+, KTo+, QTo+, JTo; all suited broadways
+      addAToPlus(g);
+      g.add("KTo"); g.add("KJo"); g.add("KQo");
+      g.add("QTo"); g.add("QJo");
+      g.add("JTo");
+      addAllSuitedBroadways(g);
+      // Suited Aces: A2s–A5s
+      addA2s_to_A5s(g);
+      // Suited connectors: T9s–54s
+      addSuitedConnectorsRange(g, "T9", "54");
+      // Suited gappers: 97s–64s
+      addSuitedGappersRange(g, "9", "6");
+      // Offsuit Aces: A8o+
+      addA8oPlus(g);
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["AJo","ATo","KTo","QTo","J9s","T8s","97s","54s"])
+  },
+
+  BTN: {
+    OPEN_GREEN: (()=>{ // ~45–50%
+      const g = new Set();
+      addPairs(g, "22");
+      // Broadways: ALL offsuit & suited
+      addAllOffsuitBroadways(g);
+      addAllSuitedBroadways(g);
+      // Offsuit Aces: A2o+
+      addA2oPlus(g);
+      // Suited Aces: ALL Axs
+      addAllAxs(g);
+      // Suited connectors: T9s–32s
+      addSuitedConnectorsDownTo(g, "32");
+      // Suited gappers: 97s–42s
+      addSuitedGappersRange(g, "9", "4");
+      // Offsuit connectors: T9o, 98o, 87o
+      addOffsuitConnectorsList(g, ["T9o","98o","87o"]);
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["K8s","Q8s","J7s","T7s","A9o","K9o","Q9o"])
+  },
+
+  SB: {
+    OPEN_GREEN: (()=>{ // ~35–40% (raise-or-fold; modern)
+      const g = new Set();
+      addPairs(g, "22");
+      // Aces
+      addA2oPlus(g);     // A2o+
+      addAllAxs(g);      // all Axs
+      // Suited broadways: ALL
+      addAllSuitedBroadways(g);
+      // Most offsuit broadways: KTo+, QTo+, JTo
+      addMostOffsuitBroadways_KTo_QTo_JTo(g);
+      // Suited connectors: T9s–54s
+      addSuitedConnectorsRange(g, "T9", "54");
+      // Suited gappers: 97s–64s
+      addSuitedGappersRange(g, "9", "6");
+      // Offsuit connectors: T9o, 98o
+      addOffsuitConnectorsList(g, ["T9o","98o"]);
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["AJo","KJo","QJo","J9s","T8s","76s"]) // kept from earlier
+  },
+
+  BB: {
+    // If everyone folds to BB & you raise (rare), use a wide but slightly tighter than SB set.
+    OPEN_GREEN: (()=>{ 
+      const g = new Set();
+      addPairs(g, "22");
+      addAllSuitedBroadways(g);
+      addMostOffsuitBroadways_KTo_QTo_JTo(g); // "most offsuit broadways"
+      addA2oPlus(g);      // A2o+
+      addAllAxs(g);       // all Axs
+      addSuitedConnectorsRange(g, "T9", "54");
+      addSuitedGappersRange(g, "9", "6");
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["A9s","A8s","KJs","QTs","J9s","98s"])
+  }
+};
+
+// Ensure AMBER doesn’t duplicate GREEN (for cleaner coloring)
+(function deDupeAmber(){
+  Object.values(EXPLICIT_OPEN).forEach(seat=>{
+    if (!seat || !seat.OPEN_GREEN || !seat.OPEN_AMBER) return;
+    for (const code of seat.OPEN_GREEN) {
+      if (seat.OPEN_AMBER.has(code)) seat.OPEN_AMBER.delete(code);
+    }
+  });
+})();
+
+// Phase 4: 3-bet & Defend masks
+const HYBRID_3BET_RANGES = {
+  BTN: {
+    CO: { open:["QQ+","AKo","AQs+","KQs","AJo"], mix:["TT-JJ","ATs"] },
+    HJ: { open:["QQ+","AKo","AQs+","KQs"], mix:["JJ","ATs","KJs"] },
+    UTG:{ open:["QQ+","AKo","AQs+"], mix:["JJ","KQs"] },
+    SB: { open:["JJ+","AKo","AQs+"], mix:["AJo","KQs"] }
+  },
+  SB: {
+    BTN: { open:["JJ+","AKo","AQs+","KQs","AJo"], mix:["TT","ATs","KJs"] },
+    CO:  { open:["QQ+","AKo","AQs+","KQs"], mix:["JJ","ATs"] },
+    HJ:  { open:["QQ+","AKo","AQs+"], mix:["JJ","KQs"] },
+    UTG: { open:["QQ+","AKo","AQs+"], mix:["JJ"] }
+  },
+  CO: {
+    HJ:  { open:["QQ+","AKo","AQs+","KQs"], mix:["JJ","ATs"] },
+    UTG: { open:["QQ+","AKo","AQs+"], mix:["JJ"] }
+  },
+  HJ: {
+    UTG: { open:["QQ+","AKo","AQs+"], mix:["JJ"] }
+  },
+  BB: {
+    BTN: { open:["JJ+","AKo","AQs+","KQs"], mix:["TT","ATs","KJs"] },
+    CO:  { open:["QQ+","AKo","AQs+"], mix:["JJ","KQs"] },
+    HJ:  { open:["QQ+","AKo","AQs+"], mix:["JJ"] },
+    UTG: { open:["QQ+","AKo","AQs+"], mix:["JJ"] },
+    SB:  { open:["JJ+","AKo","AQs+"], mix:["TT","KQs"] }
+  }
+};
+const HYBRID_DEFEND_RANGES = {
+  BTN: { open:["22+","A2s+","K7s+","Q8s+","J8s+","T8s+","98s-54s","A2o+","KTo+","QTo+","JTo"], mix:["K9o","Q9o"] },
+  CO:  { open:["22+","A2s+","K8s+","Q9s+","J9s+","T9s-65s","A8o+","KJo+","QJo"], mix:["KTo","QTo"] },
+  HJ:  { open:["22+","A2s+","K9s+","QTs+","JTs-76s","A9o+","KQo"], mix:["KJo","QJo"] },
+  UTG: { open:["22+","A3s+","KTs+","QJs","JTs-87s","AJo+","KQo"], mix:["ATo","KJo"] },
+  SB:  { open:["—"], mix:["—"] } // note: SB defend is special; often 3-bet/fold vs late opens
+};
+
+// Normalize a token (e.g., "ATs-A5s", "A2o+", "TT+") into explicit hand codes.
+// Works with:
+//  - Pairs:  "TT+", "99"
+//  - Suited: "AQs+", "ATs-A5s", "T9s-54s", "KQs"
+//  - Offsuit:"A2o+", "KQo"
+// Notes:
+//  - RANKS_ASC = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"] (high -> low)
+//  - RANK_INDEX maps rank -> index in that array (smaller index = stronger rank).
+function expandToken(token){
+  token = token.replace(/[–—]/g, '-').trim();
+
+  // ---------- 1) PAIRS with "+" e.g., "TT+" ----------
+  if (/^([2-9TJQKA])\1\+$/.test(token)) {
+    const hi = token[0];                 // e.g., 'T'
+    const startIdx = RANKS_ASC.indexOf(hi);
+    // From AA down to TT: indices 0..startIdx inclusive
+    return RANKS_ASC.slice(0, startIdx + 1).map(r => r + r);
+  }
+
+  // ---------- 2) Single PAIR e.g., "99" ----------
+  if (/^([2-9TJQKA])\1$/.test(token)) {
+    return [token];
+  }
+
+  // ---------- 3) SUITED / OFFSUIT with "+" e.g., "A2o+", "K9s+" ----------
+  // Meaning: fix the first rank (hi) and sweep the second rank from 'lo' up to just below 'hi'.
+  if (/^[2-9TJQKA]{2}[so]\+$/.test(token)) {
+    const hi  = token[0];
+    const lo0 = token[1];
+    const sfx = token[2]; // 's' or 'o'
+    const hiIdx = RANK_INDEX[hi];      // e.g., 'A' -> 0
+    const loIdx0 = RANK_INDEX[lo0];    // e.g., '2' -> 12
+    const stopAt = hiIdx + 1;          // sweep down to just under 'hi' (e.g., A -> stop at K (idx 1))
+    const out = [];
+    // Walk indices DOWN: lo0, then stronger kickers approaching 'hi', but NOT past stopAt
+    for (let i = loIdx0; i >= stopAt; i--) {
+      const kicker = RANKS_ASC[i];
+      out.push(hi + kicker + sfx);
+    }
+    return out;
+  }
+
+  // ---------- 4) RANGED SUITED AX/Broadway e.g., "ATs-A5s" ----------
+  if (/^[2-9TJQKA]{2}s-[2-9TJQKA]{2}s$/.test(token)) {
+    const hi      = token[0];          // 'A' in "ATs-A5s"
+    const loStart = token[1];          // 'T'
+    const loEnd   = token[4];          // '5'
+    const startIdx = RANKS_ASC.indexOf(loStart);
+    const endIdx   = RANKS_ASC.indexOf(loEnd);
+    const out = [];
+    for (let i = startIdx; i <= endIdx; i++) {
+      const lo = RANKS_ASC[i];
+      if (RANK_INDEX[hi] < RANK_INDEX[lo]) out.push(hi + lo + 's');
+    }
+    return out;
+  }
+
+  // ---------- 5) RANGED SUITED CONNECTORS e.g., "T9s-54s" ----------
+  if (/^[2-9TJQKA][2-9TJQKA]s-[2-9TJQKA][2-9TJQKA]s$/.test(token)) {
+    const a = token.slice(0, 3);   // e.g., T9s
+    const b = token.slice(4, 7);   // e.g., 54s
+    const seq = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"]; // high -> low
+
+    // Find start like "T9s" in the descending chain; then move down until we hit "54s"
+    let out = [];
+    let startFound = false;
+    for (let i = 0; i < seq.length - 1; i++) {
+      const hi = seq[i], lo = seq[i+1];
+      const code = hi + lo + 's';
+      if (!startFound) {
+        if (code === a) { startFound = true; out.push(code); }
+      } else {
+        out.push(code);
+        if (code === b) break;
+      }
+    }
+    return out;
+  }
+
+  // ---------- 6) Single suited/offsuit like "KQs", "QJo" ----------
+  if (/^[2-9TJQKA]{2}[so]$/.test(token)) {
+    const hi = token[0], lo = token[1];
+    if (RANK_INDEX[hi] < RANK_INDEX[lo]) return [token]; // ensure hi > lo by rank strength
+    return [];
+  }
+
+  // ---------- 7) Edge fallback: raw two-rank "AK" (rare) ----------
+  if (/^[2-9TJQKA]{2}$/.test(token)) return [token];
+
+  return [];
+}
+
+function buildClassMapForPos(pos){
+  const def = HYBRID_RANGES[pos] || {open:[], mix:[]};
+  const openSet = new Set(def.open.flatMap(expandToken));
+  const mixSet  = new Set(def.mix.flatMap(expandToken));
+  return buildClassMapFromSets(openSet, mixSet);
+}
+function buildClassMapFromSets(openSet, mixSet){
+  const map = new Map();
+  for (let i=0;i<RANKS_ASC.length;i++){
+    for (let j=0;j<RANKS_ASC.length;j++){
+      const r1=RANKS_ASC[i], r2=RANKS_ASC[j];
+      if (i===j){
+        const code=r1+r2;
+        map.set(code, openSet.has(code)?'open':(mixSet.has(code)?'mix':'fold'));
+      } else if (i<j){
+        const sCode=r1+r2+'s', oCode=r1+r2+'o';
+        map.set(sCode, openSet.has(sCode)?'open':(mixSet.has(sCode)?'mix':'fold'));
+        map.set(oCode, openSet.has(oCode)?'open':(mixSet.has(oCode)?'mix':'fold'));
+      }
+    }
+  }
+  return map;
+}
+
+function currentPosition(){ return POSITIONS6[heroPosIdx % POSITIONS6.length]; }
+function heroHandCode(){
+  const [c1,c2]=holeCards;
+  const rA=c1.rank, rB=c2.rank, sA=c1.suit, sB=c2.suit;
+  if (rA===rB) return rA+rB;
+  const hi = (RANK_INDEX[rA] < RANK_INDEX[rB]) ? rA : rB;
+  const lo = (hi===rA) ? rB : rA;
+  const suited = (sA===sB);
+  return hi + lo + (suited?'s':'o');
+}
+function classifyHeroHandAtPosition(){
+  const code = heroHandCode();
+  const seat = currentPosition();
+  const clsMap = getClassMapForSeat(seat);   // <— explicit-first
+  const cls = clsMap.get(code) || 'fold';
+  return (cls === 'open') ? 'Open' : (cls === 'mix' ? 'Mix' : 'Fold');
+}
+function setPositionDisc(){
+  const pos = currentPosition();
+  if (positionDisc) positionDisc.textContent = pos;
+}
+function setPreflopBadge(){
+  if (!preflopRangeBadge) return;
+  if (STAGES[currentStageIndex]!=='preflop'){ preflopRangeBadge.classList.add('hidden'); return; }
+  const cls = classifyHeroHandAtPosition();
+  preflopRangeBadge.classList.remove('hidden','green','amber','red');
+  preflopRangeBadge.textContent = `Preflop Range: ${cls}`;
+  if (cls==='Open') preflopRangeBadge.classList.add('green');
+  else if (cls==='Mix') preflopRangeBadge.classList.add('amber');
+  else preflopRangeBadge.classList.add('red');
+}
+
+function openRangeModal(){
+  if (!rangeModalOverlay || !rangeModalBody) return;
+  const seat = currentPosition();
+  const heroCode = heroHandCode();
+  const vsSeats = ["UTG","HJ","CO","BTN","SB"]; // opener seats
+
+  const controlsHtml = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+      <div class="tabbar" role="tablist" aria-label="Range mode">
+        <button class="tab active" data-mode="open" role="tab" aria-selected="true">Open</button>
+        <button class="tab" data-mode="3bet" role="tab">3‑bet</button>
+        <button class="tab" data-mode="defend" role="tab">Defend</button>
+      </div>
+      <div>
+        <label style="font-weight:700;margin-right:6px">vs</label>
+        <select id="rangeVsSelect" class="small-select" disabled>
+          ${vsSeats.map(s=>`<option value="${s}">${s}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
+      <div><strong>Seat:</strong> ${seat} &nbsp; <strong>Hybrid baseline</strong> (solver‑inspired, simplified)</div>
+      <div><span class="badge green">Open</span> <span class="badge amber">Mix</span> <span class="badge red">Fold</span></div>
+    </div>
+  `;
+
+  const gridContainer = document.createElement('div');
+  gridContainer.className = 'range-grid';
+
+  const NO_DATA_HTML = `
+    <div style="margin:.5rem 0;color:#9aa3b2">
+      No data for this (seat, mode, vs) combination yet. Choose a different 'vs' or switch mode.
+    </div>
+  `;
+
+  function classMapFromLists(lists){
+    if (!lists) return null;
+    const openSet = new Set((lists.open  ?? []).flatMap(expandToken));
+    const mixSet  = new Set((lists.mix   ?? []).flatMap(expandToken));
+    // if both sets are empty → return null to show "No data"
+    if (openSet.size===0 && mixSet.size===0) return null;
+    return buildClassMapFromSets(openSet, mixSet);
+  }
+
+ function classMapOpen() {
+  const exp = EXPLICIT_OPEN[seat];
+  if (exp && (exp.OPEN_GREEN?.size || exp.OPEN_AMBER?.size)) {
+    const map = new Map();
+    for (let i=0;i<RANKS_ASC.length;i++){
+      for (let j=0;j<RANKS_ASC.length;j++){
+        const r1=RANKS_ASC[i], r2=RANKS_ASC[j];
+        let code;
+        if (i===j) code=r1+r2;
+        else if (i<j) code=r1+r2+'s';
+        else code=r2+r1+'o';
+        let cls='fold';
+        if (exp.OPEN_GREEN?.has(code)) cls='open';
+        else if (exp.OPEN_AMBER?.has(code)) cls='mix';
+        map.set(code, cls);
+      }
+    }
+    return map;
+  }
+  // Fallback: if a seat isn't defined explicitly, use your hybrid tokens
+  return buildClassMapForPos(seat);
+}
+
+  function classMap3bet(vsSeat) {
+    const branch = HYBRID_3BET_RANGES[seat]?.[vsSeat] ?? null;
+    return classMapFromLists(branch);
+  }
+  function classMapDefend(vsSeat) {
+    // Defend currently only modeled for BB (as in your earlier spec)
+    if (seat !== 'BB') return null;
+    const branch = HYBRID_DEFEND_RANGES[vsSeat] ?? null;
+    return classMapFromLists(branch);
+  }
+
+  function renderGridOrEmpty(clsMap){
+    if (!clsMap) {
+      gridContainer.innerHTML = NO_DATA_HTML;
+      return;
+    }
+    const headerRow = ['','A','K','Q','J','T','9','8','7','6','5','4','3','2']
+      .map((h,i)=>`<div class="${i===0?'':'hdr'}">${h}</div>`).join('');
+    let html = headerRow;
+    for (let i=0;i<RANKS_ASC.length;i++){
+      const rowRank = RANKS_ASC[i];
+      html += `<div class="hdr">${rowRank}</div>`;
+      for (let j=0;j<RANKS_ASC.length;j++){
+        const colRank = RANKS_ASC[j];
+        let code, label;
+        if (i===j){ code=rowRank+colRank; label=code; }
+        else if (i<j){ code=rowRank+colRank+'s'; label=code; }
+        else { code=colRank+rowRank+'o'; label=code; }
+        const cls = clsMap.get(code) || 'fold';
+        const clsClass = (cls==='open')?'cell-open':(cls==='mix'?'cell-mix':'cell-fold');
+        const heroMark = (code===heroCode) ? ' cell-hero' : '';
+        html += `<div class="cell ${clsClass}${heroMark}" title="${label}">${label}</div>`;
+      }
+    }
+    gridContainer.innerHTML = html;
+  }
+
+  rangeModalBody.innerHTML = controlsHtml;
+  rangeModalBody.appendChild(gridContainer);
+
+  // Initial render: OPEN
+  renderGridOrEmpty(classMapOpen());
+
+  const tabs = rangeModalBody.querySelectorAll('.tabbar .tab');
+  const vsSel = rangeModalBody.querySelector('#rangeVsSelect');
+
+  function setActiveMode(mode){
+    tabs.forEach(t=>t.classList.toggle('active', t.getAttribute('data-mode')===mode));
+    const enableVs = (mode !== 'open');
+    vsSel.disabled = !enableVs;
+
+    let clsMap = null;
+    if (mode==='open') clsMap = classMapOpen();
+    else if (mode==='3bet') clsMap = classMap3bet(vsSel.value);
+    else clsMap = classMapDefend(vsSel.value);
+
+    renderGridOrEmpty(clsMap);
+  }
+
+  tabs.forEach(t=> t.addEventListener('click', ()=> setActiveMode(t.getAttribute('data-mode'))));
+  vsSel.addEventListener('change', ()=>{
+    const active = [...tabs].find(t=>t.classList.contains('active'))?.getAttribute('data-mode') || 'open';
+    setActiveMode(active);
+  });
+
+  rangeModalOverlay.classList.remove('hidden');
+}
+
+function closeRangeModal(){ if (rangeModalOverlay) rangeModalOverlay.classList.add('hidden'); }
+
+function showPosPopover(){
+  if (!positionDisc || !posPopover) return;
+  const pos = currentPosition();
+  posPopover.textContent = POS_ONE_LINERS[pos] || pos;
+  const rect = positionDisc.getBoundingClientRect();
+  const x = rect.left + (rect.width/2) - 120;
+  const y = rect.bottom + 8;
+  posPopover.style.left = Math.max(8,x) + "px";
+  posPopover.style.top  = y + "px";
+  posPopover.classList.remove('hidden');
+}
+function hidePosPopover(){ if (posPopover) posPopover.classList.add('hidden'); }
+
+function recommendedOpenSizeRangeBb(pos){
+  if (pos==='SB') return [3.0,4.0];
+  if (pos==='BTN') return [2.0,2.5];
+  return [2.0,2.5]; // UTG/HJ/CO
+}
+function sizeEvalBadgeColor(evalStr){
+  if (evalStr==='Good') return 'green';
+  if (evalStr && evalStr.startsWith('Slightly')) return 'amber';
+  if (evalStr==='n/a') return 'gray';
+  return 'red';
+}
+function openSizeRuleFor(pos){
+  if (pos === 'SB') return "SB: raise‑only; prefer 3.0–4.0x (OOP).";
+  if (pos === 'BTN') return "BTN: prefer 2.0–2.5x (pressure blinds, widen range).";
+  return `${pos}: prefer 2.0–2.5x (linear opens from tighter ranges).`;
+}
+function buildSizeAdvice(pos, size, min, max){
+  if (pos==='SB'){
+    if (size<min) return "SB opens are typically larger (3–4x) to compensate for being out of position.";
+    if (size>max) return "SB can open large, but 3–4x is sufficient in most lineups.";
+    return "Nice. SB larger opens (3–4x) deny equity and simplify postflop play OOP.";
+  }
+  if (pos==='BTN'){
+    if (size<min) return "BTN opens too small lose value; 2.0–2.5x is efficient vs blinds.";
+    if (size>max) return "BTN usually keeps opens small (2.0–2.5x) to widen range and price defenses poorly.";
+    return "Perfect. Small BTN opens (2.0–2.5x) pressure blinds while keeping range wide.";
+  }
+  if (size<min) return "Open is slightly small; common baselines are ~2.0–2.5x here.";
+  if (size>max) return "Open is larger than typical; most baselines prefer ~2.0–2.5x in early/mid seats.";
+  return "Good. Linear opens in early/mid seats usually use ~2.0–2.5x.";
+}
+
+// ==================== Phase 2: Board → category & C-bet guide ====================
+const POSTFLOP_SIZE_PRESETS = [25,33,50,66,75,100,150];
+const CBET_GUIDE = {
+  "A_HIGH_RAINBOW":  { label:"A‑High Rainbow",    freq:"High", sizes:[25,33],   note:"Range & nut advantage → small, frequent bets." },
+  "LOW_DISCONNECTED":{ label:"Low Disconnected",  freq:"High", sizes:[25,33],   note:"Deny equity to overcards; small bets perform well." },
+  "PAIRED_LOW":      { label:"Paired (Low)",      freq:"Med",  sizes:[33,66],   note:"Mix checks; when betting, lean small‑to‑medium." },
+  "BROADWAY_HEAVY":  { label:"Broadway‑Heavy",    freq:"Med",  sizes:[33,50],   note:"Ranges interact; favour small/medium in position." },
+  "TWO_TONE_DYNAMIC":{ label:"Two‑tone / Wet",    freq:"Low",  sizes:[66,100],  note:"Lower freq; size up to tax draws." },
+  "MONOTONE":        { label:"Monotone",          freq:"Low",  sizes:[66,100],  note:"Compressed equities; polar bigger bets or checks." },
+  "FOUR_TO_STRAIGHT":{ label:"4‑to‑Straight",     freq:"Low",  sizes:[100,150], note:"Threat advantage → large/overbets when betting." }
+};
+function boardHasManyBroadways(board){
+  const BW=new Set(["T","J","Q","K","A"]); let cnt=0; board.forEach(c=>{ if (BW.has(c.rank)) cnt++; }); return cnt>=2;
+}
+function isAHighRainbowDry(board){
+  if (board.length<3) return false;
+  const ranks=board.map(c=>c.rank); const hasA = ranks.includes("A");
+  const suits = new Set(board.map(c=>c.suit));
+  const tex = analyzeBoard(board, []);
+  return hasA && suits.size>=3 && !tex.connected && !tex.fourToStraight;
+}
+function boardPairedRankAtMost(board, maxRankChar){
+  const map={}; board.forEach(c=> map[c.rank]=(map[c.rank]??0)+1 );
+  const order=["2","3","4","5","6","7","8","9","T","J","Q","K","A"];
+  const maxIdx=order.indexOf(maxRankChar);
+  return Object.keys(map).some(r => map[r]>=2 && order.indexOf(r)<=maxIdx);
+}
+function mapBoardToCategory(board, hole){
+  const tex = analyzeBoard(board, hole);
+  if (tex.fourToStraight) return "FOUR_TO_STRAIGHT";
+  if (tex.mono)           return "MONOTONE";
+  const suits = new Set(board.map(c=>c.suit));
+  const twoTone = (board.length>=3 && suits.size===2 && !tex.mono);
+  if (twoTone && (tex.connected || boardHasManyBroadways(board))) return "TWO_TONE_DYNAMIC";
+  if (boardPairedRankAtMost(board, "9")) return "PAIRED_LOW";
+  if (isAHighRainbowDry(board)) return "A_HIGH_RAINBOW";
+  if (boardHasManyBroadways(board)) return "BROADWAY_HEAVY";
+  return "LOW_DISCONNECTED";
+}
+
+function openGuideModalFor(categoryKey){
+  if (!guideModalOverlay || !guideModalBody) return;
+  const g = CBET_GUIDE[categoryKey];
+
+  if (!g) {
+    guideModalBody.innerHTML = `
+      <div style="color:#9aa3b2">No guide available for this texture (key: <code>${categoryKey || 'unknown'}</code>).</div>
+    `;
+    guideModalOverlay.classList.remove('hidden');
+    return;
+  }
+
+  // Header labels: 25% / 33% / ... (kept)
+  const hdr = ['<div class="hdr"></div>']
+    .concat(POSTFLOP_SIZE_PRESETS.map(s => `<div class="hdr">${s}%</div>`))
+    .join('');
+
+  // Which bucket class applies to a given size
+  const freqClass = (pct) => {
+    if (g.sizes.includes(pct)) return 'freq-high';
+    const near = g.sizes.some(x => Math.abs(x - pct) <= (pct >= 100 ? 25 : 17));
+    return near ? 'freq-med' : 'freq-low';
+  };
+
+  // *** NEW: Put a visible dot + accessible label inside each cell ***
+  const cells = POSTFLOP_SIZE_PRESETS.map(pct => {
+    const klass = freqClass(pct);
+    const aria = (klass === 'freq-high') ? 'High (recommended)' : (klass === 'freq-med' ? 'Medium (adjacent)' : 'Low');
+    return `
+      <div class="cell ${klass}" aria-label="${pct}% · ${aria}" title="${pct}% — ${aria}">
+        <span class="dot">●</span>
+      </div>
+    `;
+  }).join('');
+
+  guideModalBody.innerHTML = `
+    <div><strong>Board:</strong> ${g.label}</div>
+    <div class="guide-grid" style="margin-top:6px">
+      ${hdr}
+      <div class="rowhdr">${g.freq} c‑bet frequency</div>
+      ${cells}
+    </div>
+    <div class="legend">
+      <span class="chip hi">High (recommended)</span>
+      <span class="chip med">Medium (adjacent)</span>
+      <span class="chip low">Low</span>
+    </div>
+    <div style="margin-top:8px;color:#9aa3b2">${g.note}</div>
+  `;
+  guideModalOverlay.classList.remove('hidden');
+};
+  
+function closeGuideModal(){ if (guideModalOverlay) guideModalOverlay.classList.add('hidden'); }
+
+// ===== Decision label + size rows =====
+function updateDecisionLabels(){
+  const stage = STAGES[currentStageIndex];
+  const decRaiseLabel = document.querySelector('label[for="decRaise"]');
+  if (!decRaiseLabel) return;
+  if (stage==='preflop') decRaiseLabel.textContent = "Raise";
+  else decRaiseLabel.textContent = (toCall>0) ? "Raise" : "Bet";
+
+  const isPre = (stage==='preflop'), isPost = !isPre;
+  const raiseChecked = document.getElementById('decRaise')?.checked;
+  if (sizePresetRow) sizePresetRow.classList.toggle('hidden', !(isPre && raiseChecked));
+  if (sizePresetRowPost) sizePresetRowPost.classList.toggle('hidden', !(isPost && raiseChecked));
+}
+
+// ==================== Phase 3 helpers/evaluators ====================
+function determinePostflopAction(decision, toCall){
+  if (decision==='fold') return 'fold';
+  if (decision==='call') return toCall>0 ? 'call' : 'check';
+  if (decision==='raise') return toCall>0 ? 'raise' : 'bet';
+  return 'check';
+}
+function betOrRaiseLabelForStage(){
+  const stage=STAGES[currentStageIndex];
+  if (stage==='preflop') return 'Raise';
+  return (toCall>0) ? 'Raise' : 'Bet';
+}
+function fmtSizeRangePct(sizes){
+  if (!sizes || !sizes.length) return '';
+  const sorted=[...sizes].sort((a,b)=>a-b);
+  const lo=sorted[0], hi=sorted[sorted.length-1];
+  const plus = (hi>=150) ? '+' : '';
+  return (lo===hi) ? `${hi}%${plus}` : `${lo}–${hi}%${plus}`;
+}
+function boardToString(cards){ if (!cards||!cards.length) return ''; return cards.map(c=>`${c.rank}${c.suit}`).join(' '); }
+function inPositionHeuristic(pos){ if (pos==='BTN' || pos==='CO') return true; if (pos==='SB'||pos==='BB'||pos==='UTG') return false; return false; }
+
+function evalSizeAgainstGuide(chosenPct, guideSizes){
+  if (chosenPct==null || !isFinite(chosenPct)) return { verdict:'n/a', detail:'No size selected.' };
+  if (!guideSizes || !guideSizes.length) return { verdict:'n/a', detail:'No guide for this texture.' };
+  const rec = new Set(guideSizes);
+  if (rec.has(chosenPct)) return { verdict:'Good', detail:'Chosen size matches the recommended bucket.' };
+  const near = guideSizes.some(x => Math.abs(x-chosenPct) <= (chosenPct>=100?25:17));
+  if (near){
+    if (chosenPct < Math.min(...guideSizes)) return { verdict:'Slightly small', detail:'Slightly smaller than typical for this texture.' };
+    if (chosenPct > Math.max(...guideSizes)) return { verdict:'Slightly large', detail:'Slightly larger than typical for this texture.' };
+    return { verdict:'Slightly off', detail:'Near the recommended bucket.' };
+  }
+  if (chosenPct < Math.min(...guideSizes)) return { verdict:'Too small', detail:'Much smaller than the usual sizes for this texture.' };
+  return { verdict:'Too large', detail:'Much larger than the usual sizes for this texture.' };
+}
+function evaluateFlopCbet(catKey, isHeroPFR, pos, action, sizePct){
+  const g = CBET_GUIDE[catKey];
+  if (!g) return { cbetEval:'n/a', sizeEval:'n/a', note:'No guide available for this texture.' };
+  if (!isHeroPFR) return { cbetEval:'Not PFR', sizeEval:'n/a', note:'You are not the preflop raiser — c‑bet guidance does not apply.' };
+
+  const freq=g.freq; let cbetEval='Mixed';
+  if (freq==='High') cbetEval = (action==='bet') ? 'Correct' : 'Missed c‑bet (okay sometimes)';
+  if (freq==='Med')  cbetEval = (action==='bet') ? 'Okay (mix)' : 'Okay (mix)';
+  if (freq==='Low')  cbetEval = (action==='bet') ? 'Low‑freq spot (be selective)' : 'Fine to check more';
+
+  const ip=inPositionHeuristic(pos);
+  let posNote='';
+  if (ip && action==='bet' && freq!=='Low') posNote=' Being in position increases comfort for small, frequent bets.';
+  if (!ip && action==='bet' && freq!=='High') posNote=' Out of position → consider more checks or larger, polar bets when you do bet.';
+
+  const sizeRes = evalSizeAgainstGuide(sizePct, g.sizes);
+  const sizeEval=sizeRes.verdict, sizeNote=sizeRes.detail;
+
+  let note = `${g.label}: ${g.note}`;
+  note += posNote ? ` ${posNote}` : '';
+  if (sizeEval && sizeEval!=='n/a') note += ` Size: ${sizeEval}. ${sizeNote}`;
+  return { cbetEval, sizeEval, note, recFreq:g.freq, recSizes:fmtSizeRangePct(g.sizes) };
+}
+function classifyTransition(prevBoard, newBoard, hole){
+  const before=analyzeBoard(prevBoard,hole), after=analyzeBoard(newBoard,hole);
+  const gotMonotone = (!before.mono && after.mono);
+  const nowFourToStraight = after.fourToStraight && !before.fourToStraight;
+  const pairedBefore=before.paired, pairedAfter=after.paired;
+  const boardPairedUp = (!pairedBefore && pairedAfter);
+  const hiSet=new Set(["A","K","Q"]);
+  const newCard=newBoard[newBoard.length-1];
+  const overcardCame = hiSet.has(newCard.rank);
+
+  let goodForPFR=false, badForPFR=false;
+  if (overcardCame) goodForPFR=true;
+  if (gotMonotone || nowFourToStraight || boardPairedUp) badForPFR=true;
+  return { goodForPFR, badForPFR, gotMonotone, nowFourToStraight, boardPairedUp, overcardCame };
+}
+function evaluateBarrel(stage, prevBoard, currBoard, isHeroPFR, pos, prevAggressive, action, sizePct){
+  if (!isHeroPFR) return { barrelEval:'Not PFR', sizeEval:'n/a', note:'You are not PFR — default is to be selective with stabs.' };
+  const trans = classifyTransition(prevBoard, currBoard, holeCards);
+  const ip = inPositionHeuristic(pos);
+  let barrelEval='Mixed', logicNote=[];
+  if (trans.goodForPFR && !trans.badForPFR){
+    barrelEval = (action==='bet'||action==='raise') ? 'Good continue' : 'Okay to slow down';
+    logicNote.push('Overcard favours aggressor; continuing is reasonable.');
+  } else if (trans.badForPFR && !trans.goodForPFR){
+    barrelEval = (action==='bet'||action==='raise') ? 'Risky barrel' : 'Prudent check more';
+    if (trans.gotMonotone) logicNote.push('Board turned monotone — equities compress; reduce barrel frequency.');
+    if (trans.nowFourToStraight) logicNote.push('Four‑to‑straight appears — ranges tighten; prefer polar bets if continuing.');
+    if (trans.boardPairedUp) logicNote.push('Board paired — boats/quads live; slow down frequency.');
+  } else {
+    barrelEval='Mixed (neutral card)'; logicNote.push('Neutral runout — mix checks and medium‑sized barrels.');
+  }
+  const cat = mapBoardToCategory(currBoard, holeCards);
+  const g = CBET_GUIDE[cat];
+  const sizeRes = evalSizeAgainstGuide(sizePct, g ? g.sizes : null);
+  const sizeEval = sizeRes.verdict, sizeNote=sizeRes.detail;
+  if (!ip && (action==='bet'||action==='raise') && g && g.freq==='Low'){
+    logicNote.push('OOP on low‑freq textures → check more or size up when polarized.');
+  }
+  let note = `${g ? g.label : 'Texture'}: ${g ? g.note : 'No guide.'}`;
+  if (logicNote.length) note += ` ${logicNote.join(' ')}`;
+  if (sizeEval && sizeEval!=='n/a') note += ` Size: ${sizeEval}. ${sizeNote}`;
+  return { barrelEval, sizeEval, note, recFreq: g ? g.freq : '', recSizes: g ? fmtSizeRangePct(g.sizes) : '' };
+}
+
+// ==================== Phase 4: Non-PFR probe & River line ====================
+function isProbeSpot(actionLabel){ return preflopAggressor!=='hero' && toCall===0 && (actionLabel==='bet' || actionLabel==='raise'); }
+function evaluateProbe(stage, catKey, pos, actionLabel, sizePct){
+  const ip = inPositionHeuristic(pos);
+  const g = CBET_GUIDE[catKey];
+  if (!g) return { probeEval:'n/a', sizeEval:'n/a', note:'No guide for this texture.' };
+  let desirability='Medium';
+  if (catKey==='LOW_DISCONNECTED' || catKey==='PAIRED_LOW') desirability = ip ? 'High' : 'Medium';
+  if (catKey==='A_HIGH_RAINBOW' || catKey==='BROADWAY_HEAVY') desirability = 'Low';
+  if (catKey==='TWO_TONE_DYNAMIC') desirability='Medium';
+  if (catKey==='MONOTONE' || catKey==='FOUR_TO_STRAIGHT') desirability='Medium (polar)';
+
+  let probeEval='Mixed';
+  if (desirability.startsWith('High')) probeEval='Good probe (esp. IP)';
+  else if (desirability.startsWith('Medium')) probeEval='Okay (be selective)';
+  else probeEval='Risky probe (prefer checks)';
+
+  let recSizes=g.sizes;
+  if (catKey==='LOW_DISCONNECTED') recSizes=[25,33,50];
+  if (catKey==='PAIRED_LOW')       recSizes=[33,50,66];
+  if (catKey==='FOUR_TO_STRAIGHT' || catKey==='MONOTONE') recSizes=[66,100,150];
+
+  const sizeRes=evalSizeAgainstGuide(sizePct ?? null, recSizes);
+  const sizeEval=sizeRes.verdict, sizeNote=sizeRes.detail;
+
+  let note = `${g.label}: Probe desirability — ${desirability}.`;
+  if (ip) note += ' In position you realize equity better; probing improves EV.';
+  else note += ' Out of position, prefer checks unless board is especially favourable.';
+  if (sizeEval && sizeEval!=='n/a') note += ` Size: ${sizeEval}. ${sizeNote}`;
+
+  return { probeEval, sizeEval, note, recSizes: fmtSizeRangePct(recSizes) };
+}
+function classifyRiverLine(actionLabel, sizePct, hole, board){
+  const made = describeMadeHand(hole, board);
+  const cat = made.cat, label = made.label;
+  let line='Check-back', expl='';
+  if (actionLabel==='bet' || actionLabel==='raise'){
+    if (cat>=2){ line='Value'; expl=`Strong made hand on river (${label}). Betting for value makes sense.`; }
+    else if (cat===1){ if ((sizePct??0)<=50){ line='Thin Value'; expl=`One Pair with small/medium size — thin value line.`; }
+      else { line='Polar (value/bluff)'; expl=`One Pair with large size — often better as check or polar line; be selective.`; } }
+    else { line='Bluff'; expl=`No made hand of strength — your river bet functions as a bluff.`; }
+  } else if (actionLabel==='call'){
+    if (cat>=2){ line='Value-catch'; expl=`Two Pair+ — calling to realize value vs bluffs or thin bets.`; }
+    else if (cat===1){ line='Bluff-catcher'; expl=`One Pair — classic bluff-catch spot; ensure price is right.`; }
+    else { line='Speculative call'; expl=`Weak hand — river calls without strength are rarely profitable.`; }
+  } else if (actionLabel==='check'){
+    if (cat>=2){ line='Missed value (sometimes ok)'; expl=`You hold ${label}. Consider betting unless trapping or inducing.`; }
+    else if (cat===1){ line='Pot control'; expl=`Checking One Pair — reasonable to avoid thin value vs stronger ranges.`; }
+    else { line='Give up'; expl=`No showdown value worth betting; check and realize whatever equity remains.`; }
+  } else if (actionLabel==='fold'){
+    line='Check-fold'; expl=`You chose to fold — acceptable when price is poor or range is dominated.`;
+  }
+  let badge='gray';
+  if (line==='Value' || line==='Value-catch' || line==='Thin Value') badge='green';
+  if (line==='Bluff-catcher' || line.includes('Missed') || line==='Pot control') badge='amber';
+  if (line==='Bluff' || line==='Give up' || line==='Check-fold' || line==='Polar (value/bluff)') badge='purple';
+  return { riverLine: line, riverExplain: expl, madeLabel: label, badge };
+}
+
+// ==================== Hand flow ====================
+function startNewHand(){
   summaryPanel.style.display = "none";
   feedbackEl.innerHTML = "";
   hintsEl.textContent = "";
   inputForm.reset();
   handHistory = [];
-
   submitStageBtn.classList.remove("hidden");
   nextStageBtn.classList.add("hidden");
   if (barSubmit) barSubmit.classList.remove("hidden");
   if (barNext) barNext.classList.add("hidden");
 
-  deck = createDeck();
-  shuffle(deck);
+  deck = createDeck(); shuffle(deck);
   holeCards = [dealCard(), dealCard()];
   boardCards = [];
+  dealtHandStr = `${holeCards[0].rank}${holeCards[0].suit} ${holeCards[1].rank}${holeCards[1].suit}`;
 
-  const blinds = 15;
-  const increments = [5, 10];
-  let extra = 0;
-  const maxExtra = 100;
-  while (extra < maxExtra) {
-    const inc = increments[Math.floor(Math.random() * increments.length)];
-    if (extra + inc > maxExtra) break;
-    extra += inc;
-    if (Math.random() < 0.3) break;
+  // Rotate 6-max position
+  heroPosIdx = (heroPosIdx + 1) % POSITIONS6.length;
+  preflopAggressor = null;
+  heroActions.preflop = { action:null, sizeBb:null };
+  heroActions.flop = { action:null, sizePct:null, cbet:null };
+  heroActions.turn = { action:null, sizePct:null, barrel:null };
+  heroActions.river= { action:null, sizePct:null, barrel:null };
+
+  // Pot & blinds noise
+  const blinds=15;
+  const increments=[5,10];
+  let extra=0; const maxExtra=100;
+  while (extra<maxExtra){
+    const inc=increments[Math.floor(Math.random()*increments.length)];
+    if (extra+inc>maxExtra) break;
+    extra+=inc; if (Math.random()<0.3) break;
   }
   pot = toStep5(blinds + extra);
   toCall = toStep5(10);
+
   currentStageIndex = 0;
-  scenario = { label: "Preflop", potFactor: 0 };
+  scenario = { label:"Preflop", potFactor:0 };
 
   renderCards();
+  setPositionDisc();
+  setPreflopBadge();
+
   updatePotInfo();
   updateHintsImmediate();
   maybeStartTimer();
 }
-function advanceStage() {
+function advanceStage(){
   currentStageIndex++;
   feedbackEl.innerHTML = "";
   inputForm.reset();
   hintsEl.textContent = "";
-
   submitStageBtn.classList.remove("hidden");
   nextStageBtn.classList.add("hidden");
   if (barSubmit) barSubmit.classList.remove("hidden");
   if (barNext) barNext.classList.add("hidden");
 
-  if (currentStageIndex >= STAGES.length) { endHand(); return; }
+  if (currentStageIndex >= STAGES.length){ endHand(); return; }
   const stage = STAGES[currentStageIndex];
-
-  if (stage === "flop") { boardCards.push(dealCard(), dealCard(), dealCard()); }
-  else if (stage === "turn" || stage === "river") { boardCards.push(dealCard()); }
+  if (stage==="flop"){ boardCards.push(dealCard(), dealCard(), dealCard()); }
+  else if (stage==="turn" || stage==="river"){ boardCards.push(dealCard()); }
 
   scenario = randomScenario();
   const { bet, newPot } = computeRoundedBetAndPot(pot, scenario.potFactor);
-  toCall = bet;
-  pot = newPot;
+  toCall = bet; pot = newPot;
 
   renderCards();
   updatePotInfo();
   updateHintsImmediate();
   maybeStartTimer();
 }
-function endHand() {
+function endHand(){
   clearTimer();
   showSummary();
   sessionHistory.push(...handHistory);
@@ -913,53 +1835,36 @@ function endHand() {
   updateSessionStats();
 }
 
-// ====== Form handling ======
-inputForm.addEventListener("submit", (e) => {
+// ==================== Submit handling (with coaching) ====================
+inputForm.addEventListener("submit", (e)=>{
   e.preventDefault();
   clearTimer();
 
   const equityInput = parseFloat(document.getElementById("equityInput").value);
   const potOddsInput = parseFloat(document.getElementById("potOddsInput").value);
-
-  // Prefer unified panel values if present
-  const fd = new FormData(inputForm);
-  let decision = fd.get("decision"); // legacy radios (may be hidden)
-
-  const unifiedDecisionEl = document.getElementById('decisionUnified');
-  const unifiedPctEl      = document.getElementById('betPctUnified');
-  const unifiedBucketEl   = document.getElementById('betBucketUnified');
-
-  if (unifiedDecisionEl && unifiedDecisionEl.value) {
-    // 'fold' | 'check' | 'call' | 'bet' | 'raise'
-    decision = unifiedDecisionEl.value;
-  }
-  const unifiedBetPct    = (unifiedPctEl && unifiedPctEl.value !== '') ? parseFloat(unifiedPctEl.value) : null;
-  const unifiedBetBucket = (unifiedBucketEl && unifiedBucketEl.value) ? unifiedBucketEl.value : null;
+  const decision = new FormData(inputForm).get("decision");
+  const stage = STAGES[currentStageIndex];
 
   const equityStats = computeEquityStats(holeCards, boardCards);
   const actualEquity = equityStats.equity;
   const actualPotOdds = computePotOdds(pot, toCall);
-
   const equityError = equityInput - actualEquity;
   const potOddsError = potOddsInput - actualPotOdds;
   const equityBand = bandForError(equityError);
   const potOddsBand = bandForError(potOddsError);
   const decisionBandResult = decisionBand(actualEquity, actualPotOdds, decision);
 
-  estimateOuts(holeCards, boardCards); // ensure texture computed
   updateHintsImmediate();
 
+  // Core feedback block (existing)
   feedbackEl.innerHTML = `
     <div>
       <div><strong>Actual equity:</strong> ${actualEquity.toFixed(1)}%
-        <span class="badge ${equityBand}">Equity ${equityBand}</span>
-      </div>
+        <span class="badge ${equityBand}">Equity ${equityBand}</span></div>
       <div><strong>Actual pot odds:</strong> ${actualPotOdds.toFixed(1)}%
-        <span class="badge ${potOddsBand}">Pot odds ${potOddsBand}</span>
-      </div>
+        <span class="badge ${potOddsBand}">Pot odds ${potOddsBand}</span></div>
       <div><strong>Decision quality:</strong>
-        <span class="badge ${decisionBandResult}">${decisionBandResult.toUpperCase()}</span>
-      </div>
+        <span class="badge ${decisionBandResult}">${decisionBandResult.toUpperCase()}</span></div>
       <div style="margin-top:8px">
         <strong>How this is calculated:</strong><br/>
         Equity is from a Monte–Carlo simulation this street (baseline you vs ${SETTINGS.sim.playersBaseline} opponent${SETTINGS.sim.playersBaseline===1?'':'s'}) with street-by-street continuation to showdown.
@@ -973,9 +1878,7 @@ inputForm.addEventListener("submit", (e) => {
     </div>
   `;
 
-  const stage = STAGES[currentStageIndex];
-  const timeUsed = difficulty === "beginner" ? null : timerSeconds - (timeLeft ?? timerSeconds);
-
+  const timeUsed = difficulty==="beginner" ? null : timerSeconds - (timeLeft ?? timerSeconds);
   handHistory.push({
     stage,
     equityInput,
@@ -987,24 +1890,219 @@ inputForm.addEventListener("submit", (e) => {
     potOddsBand,
     decisionBand: decisionBandResult,
     timeUsed,
-    handTypes: equityStats.catBreakdown.slice(0,3),
-
-    // NEW (unified betting) — these can be null/undefined safely
-    betPctUnified: unifiedBetPct,
-    betBucketUnified: unifiedBetBucket
+    handTypes: equityStats.catBreakdown.slice(0,3)
   });
 
   // Pot accumulation based on hero action
-  if (SETTINGS.pot.addHeroCallBetweenStreets) {
-    if (decision === "call" || (decision === "raise" && SETTINGS.pot.treatRaiseAsCall)) {
+  if (SETTINGS.pot.addHeroCallBetweenStreets){
+    if (decision==="call" || (decision==="raise" && SETTINGS.pot.treatRaiseAsCall)){
       pot = toStep5(pot + toCall);
       toCall = 0;
       updatePotInfo();
-    } else if (decision === "fold" && SETTINGS.pot.endHandOnFold) {
-      endHand();
-      return;
+    } else if (decision==="fold" && SETTINGS.pot.endHandOnFold){
+      endHand(); return;
     }
   }
+
+  // ===== Phase 1: Preflop coaching & data
+  try{
+    if (stage==="preflop"){
+      const facingBet = toCall>0;
+      if (decision==="raise") preflopAggressor="hero";
+      else if (decision==="call" || decision==="fold") preflopAggressor = facingBet ? "villain" : null;
+      else preflopAggressor = null;
+
+      heroActions.preflop.action = decision;
+
+      const pos = POSITIONS6[heroPosIdx];
+      const rangeClass = classifyHeroHandAtPosition();
+
+      let sizeEval="", sizeAdvice="";
+      if (decision==="raise" && heroActions.preflop.sizeBb!=null){
+        const bb = heroActions.preflop.sizeBb;
+        const [min,max] = recommendedOpenSizeRangeBb(pos);
+        if (bb>=min && bb<=max) sizeEval="Good";
+        else if (bb<min && bb>=(min-0.3)) sizeEval="Slightly small";
+        else if (bb<min) sizeEval="Too small";
+        else if (bb>max && bb<=(max+0.5)) sizeEval="Slightly large";
+        else sizeEval="Too large";
+        sizeAdvice = buildSizeAdvice(pos, bb, min, max);
+      }
+
+      const sizeLine = (decision==="raise" && heroActions.preflop.sizeBb!=null)
+        ? `<div>Open size: ${heroActions.preflop.sizeBb.toFixed(1)}x — <span class="badge ${sizeEvalBadgeColor(sizeEval)}">${sizeEval||'n/a'}</span></div>
+           <div style="opacity:.9">${sizeAdvice}</div>` : "";
+
+     feedbackEl.insertAdjacentHTML('beforeend', `
+  <div style="margin-top:8px">
+    <strong>Preflop (6‑max ${pos}):</strong>
+    <div>Range check: <span class="badge ${rangeClass==='Open'?'green':(rangeClass==='Mix'?'amber':'red')}">${rangeClass}</span></div>
+    <div>PFR: ${preflopAggressor ?? 'n/a'}</div>
+    ${sizeLine}
+    <div class="muted" style="opacity:.85;margin-top:4px">Opening size rule: ${openSizeRuleFor(pos)}</div>
+  </div>
+`);
+
+      const last = handHistory[handHistory.length-1];
+      if (last){
+        last.heroPosition = pos;
+        last.dealtHand = dealtHandStr;
+        last.preflopRangeClass = rangeClass;
+        last.preflopInRange = (rangeClass!=='Fold');
+        last.preflopAggressor = preflopAggressor ?? '';
+        last.preflopAction = decision;
+        last.preflopSizeBb = heroActions.preflop.sizeBb ?? '';
+        last.preflopSizeEval = sizeEval ?? '';
+      }
+    }
+  } catch(e){ console.warn("Phase 1 preflop extras failed:", e); }
+
+  // ===== Phase 3 + 4: Postflop coaching
+  try{
+    const pos = POSITIONS6[heroPosIdx];
+    const stageIsPost = (stage==='flop'||stage==='turn'||stage==='river');
+    if (stageIsPost){
+      const actionLabel = determinePostflopAction(decision, toCall);
+      const betRaiseLabel = betOrRaiseLabelForStage();
+      heroActions[stage].action = actionLabel;
+
+      const catKey = mapBoardToCategory(boardCards, holeCards);
+      let evalBlockHtml = '';
+
+      if (stage==='flop'){
+        const isHeroPFR = (preflopAggressor==='hero');
+        const sizePct = heroActions.flop.sizePct ?? null;
+        const flopRes = evaluateFlopCbet(catKey, isHeroPFR, pos, actionLabel, sizePct);
+
+        evalBlockHtml += `
+          <div style="margin-top:8px">
+            <strong>Flop Strategy:</strong>
+            <div>C‑bet: <span class="badge ${flopRes.cbetEval.includes('Correct')?'green':(flopRes.cbetEval.includes('Low‑freq')?'amber':'amber')}">${flopRes.cbetEval}</span></div>
+            <div>Size: <span class="badge ${sizeEvalBadgeColor(flopRes.sizeEval)}">${flopRes.sizeEval}</span> (Rec: ${flopRes.recFreq} · ${flopRes.recSizes})</div>
+            <div style="opacity:.9">${flopRes.note}</div>
+          </div>
+        `;
+        const last = handHistory[handHistory.length-1];
+        if (last){
+          last.boardCards = boardToString(boardCards);
+          last.boardCategory = catKey;
+          last.betOrRaiseLabel = betRaiseLabel;
+          last.sizePct = heroActions.flop.sizePct ?? '';
+          last.cbetRecommendedFreq = flopRes.recFreq ?? '';
+          last.sizingRecommendedRange = flopRes.recSizes ?? '';
+          last.cbetEval = flopRes.cbetEval ?? '';
+          last.sizingEval = flopRes.sizeEval ?? '';
+        }
+        heroActions.flop.cbet = (isHeroPFR && actionLabel==='bet');
+
+        // Phase 4: Non-PFR probe on flop
+        if (!isHeroPFR && isProbeSpot(actionLabel)){
+          const probeRes = evaluateProbe('flop', catKey, pos, actionLabel, heroActions.flop.sizePct ?? null);
+          evalBlockHtml += `
+            <div style="margin-top:8px">
+              <strong>Flop Probe (Non‑PFR):</strong>
+              <div>Probe: <span class="badge ${probeRes.probeEval.includes('Good')?'green':(probeRes.probeEval.includes('Risky')?'red':'amber')}">${probeRes.probeEval}</span></div>
+              <div>Size: <span class="badge ${sizeEvalBadgeColor(probeRes.sizeEval)}">${probeRes.sizeEval}</span> (Guide: ${probeRes.recSizes})</div>
+              <div style="opacity:.9">${probeRes.note}</div>
+            </div>
+          `;
+          if (last){ last.postflopRole='Non-PFR'; last.probeEval = probeRes.probeEval ?? ''; }
+        } else {
+          if (last && !last.postflopRole) last.postflopRole = (preflopAggressor==='hero') ? 'PFR' : 'Caller';
+        }
+      }
+      else if (stage==='turn'){
+        const prevBoard = boardCards.slice(0,3);
+        const isHeroPFR = (preflopAggressor==='hero');
+        const sizePct = heroActions.turn.sizePct ?? null;
+        const prevAggressive = !!heroActions.flop.cbet;
+        const turnRes = evaluateBarrel('turn', prevBoard, boardCards, isHeroPFR, pos, prevAggressive, actionLabel, sizePct);
+
+        evalBlockHtml += `
+          <div style="margin-top:8px">
+            <strong>Turn Strategy:</strong>
+            <div>Barrel: <span class="badge ${turnRes.barrelEval.includes('Good')?'green':(turnRes.barrelEval.includes('Risky')?'amber':'amber')}">${turnRes.barrelEval}</span></div>
+            <div>Size: <span class="badge ${sizeEvalBadgeColor(turnRes.sizeEval)}">${turnRes.sizeEval}</span> (Rec: ${turnRes.recFreq || '—'} ${turnRes.recSizes ? '· ' + turnRes.recSizes : ''})</div>
+            <div style="opacity:.9">${turnRes.note}</div>
+          </div>
+        `;
+        const last = handHistory[handHistory.length-1];
+        if (last){
+          last.boardCards = boardToString(boardCards);
+          last.boardCategory = mapBoardToCategory(boardCards, holeCards);
+          last.betOrRaiseLabel = betRaiseLabel;
+          last.sizePct = heroActions.turn.sizePct ?? '';
+          last.cbetRecommendedFreq = turnRes.recFreq ?? '';
+          last.sizingRecommendedRange = turnRes.recSizes ?? '';
+          last.barrelEval = turnRes.barrelEval ?? '';
+          last.sizingEval = turnRes.sizeEval ?? '';
+        }
+        heroActions.turn.barrel = (actionLabel==='bet' || actionLabel==='raise');
+
+        // Non-PFR probe on turn
+        if (!isHeroPFR && isProbeSpot(actionLabel)){
+          const probeRes = evaluateProbe('turn', mapBoardToCategory(boardCards, holeCards), pos, actionLabel, heroActions.turn.sizePct ?? null);
+          evalBlockHtml += `
+            <div style="margin-top:8px">
+              <strong>Turn Probe (Non‑PFR):</strong>
+              <div>Probe: <span class="badge ${probeRes.probeEval.includes('Good')?'green':(probeRes.probeEval.includes('Risky')?'red':'amber')}">${probeRes.probeEval}</span></div>
+              <div>Size: <span class="badge ${sizeEvalBadgeColor(probeRes.sizeEval)}">${probeRes.sizeEval}</span> (Guide: ${probeRes.recSizes})</div>
+              <div style="opacity:.9">${probeRes.note}</div>
+            </div>
+          `;
+          if (last){ last.postflopRole='Non-PFR'; last.probeEval = probeRes.probeEval ?? ''; }
+        } else {
+          if (last && !last.postflopRole) last.postflopRole = (preflopAggressor==='hero') ? 'PFR' : 'Caller';
+        }
+      }
+      else if (stage==='river'){
+        const prevBoard = boardCards.slice(0,4);
+        const isHeroPFR = (preflopAggressor==='hero');
+        const sizePct = heroActions.river.sizePct ?? null;
+        const prevAggressive = !!(heroActions.turn && heroActions.turn.barrel);
+        const riverRes = evaluateBarrel('river', prevBoard, boardCards, isHeroPFR, pos, prevAggressive, actionLabel, sizePct);
+
+        evalBlockHtml += `
+          <div style="margin-top:8px">
+            <strong>River Strategy:</strong>
+            <div>Barrel: <span class="badge ${riverRes.barrelEval.includes('Good')?'green':(riverRes.barrelEval.includes('Risky')?'amber':'amber')}">${riverRes.barrelEval}</span></div>
+            <div>Size: <span class="badge ${sizeEvalBadgeColor(riverRes.sizeEval)}">${riverRes.sizeEval}</span> (Rec: ${riverRes.recFreq || '—'} ${riverRes.recSizes ? '· ' + riverRes.recSizes : ''})</div>
+            <div style="opacity:.9">${riverRes.note}</div>
+          </div>
+        `;
+        const last = handHistory[handHistory.length-1];
+        if (last){
+          last.boardCards = boardToString(boardCards);
+          last.boardCategory = mapBoardToCategory(boardCards, holeCards);
+          last.betOrRaiseLabel = betRaiseLabel;
+          last.sizePct = heroActions.river.sizePct ?? '';
+          last.cbetRecommendedFreq = riverRes.recFreq ?? '';
+          last.sizingRecommendedRange = riverRes.recSizes ?? '';
+          last.barrelEval = riverRes.barrelEval ?? '';
+          last.sizingEval = riverRes.sizeEval ?? '';
+        }
+
+        // Phase 4: River line classification
+        const actionLabelR = actionLabel;
+        const sizePctR = heroActions.river.sizePct ?? null;
+        const rc = classifyRiverLine(actionLabelR, sizePctR, holeCards, boardCards);
+        evalBlockHtml += `
+          <div style="margin-top:8px">
+            <strong>River Line:</strong>
+            <span class="badge ${rc.badge}">${rc.riverLine}</span>
+            <div style="opacity:.9">${rc.riverExplain}</div>
+          </div>
+        `;
+        if (last){ last.riverLineType = rc.riverLine; last.riverMadeHand = rc.madeLabel; }
+      }
+
+      if (evalBlockHtml) feedbackEl.insertAdjacentHTML('beforeend', evalBlockHtml);
+
+      // Store sim context (optional)
+      const last = handHistory[handHistory.length-1];
+      if (last){ last.numOpp = equityStats.numOpp; last.trials = equityStats.trials; }
+    }
+  } catch(e){ console.warn("Phase 3/4 coaching failed:", e); }
 
   submitStageBtn.classList.add("hidden");
   nextStageBtn.classList.remove("hidden");
@@ -1012,13 +2110,13 @@ inputForm.addEventListener("submit", (e) => {
   if (barNext) barNext.classList.remove("hidden");
 });
 
-nextStageBtn.addEventListener("click", () => { advanceStage(); });
+nextStageBtn.addEventListener("click", ()=> advanceStage());
 
-// Bottom bar mirrors
-if (barSubmit) barSubmit.addEventListener("click", () => { inputForm.requestSubmit(); });
-if (barNext) barNext.addEventListener("click", () => { advanceStage(); });
+// Bottom bar mirroring
+if (barSubmit) barSubmit.addEventListener("click", ()=> { inputForm.requestSubmit(); });
+if (barNext)   barNext.addEventListener("click",  ()=> { advanceStage(); });
 
-// Stepper controls for number inputs
+// Number steppers
 document.querySelectorAll(".step-btn").forEach(btn=>{
   btn.addEventListener("click", ()=>{
     const targetId = btn.getAttribute("data-target");
@@ -1031,7 +2129,10 @@ document.querySelectorAll(".step-btn").forEach(btn=>{
   });
 });
 
-// ====== Summary & session ======
+// ==================== Summary & session ====================
+
+function categoryLabel(key){ return (CBET_GUIDE[key]?.label) || key || '—'; }
+
 function showSummary() {
   let html = "";
   let totalEquityErr = 0;
@@ -1045,16 +2146,66 @@ function showSummary() {
     totalPotErr += potErr;
     if (h.decisionBand === "green") decisionGreen++;
 
-    html += `
+    // Base lines (as before)
+    let block = `
       <div class="summary-row">
         <strong>${h.stage.toUpperCase()}</strong><br/>
         Equity: you ${h.equityInput.toFixed(1)}%, actual ${h.equityActual.toFixed(1)}% (err ${eqErr.toFixed(1)}%)<br/>
         Pot odds: you ${h.potOddsInput.toFixed(1)}%, actual ${h.potOddsActual.toFixed(1)}% (err ${potErr.toFixed(1)}%)<br/>
         Decision: ${h.decision.toUpperCase()} <span class="badge ${h.decisionBand}">${h.decisionBand}</span><br/>
-        ${h.handTypes && h.handTypes.length ? `<em>Common finishing hands:</em> ${h.handTypes.map(x=>`${x.name} ${x.pct.toFixed(1)}%`).join(' · ')}` : ''}
-      </div>
-      <hr/>
     `;
+
+    // Enrich per street
+    if (h.stage === "preflop") {
+      if (h.heroPosition || h.preflopSizeEval || h.preflopRangeClass) {
+        block += `
+          <div style="margin-top:4px;opacity:.9">
+            ${h.heroPosition ? `Pos: ${h.heroPosition} · ` : ""}Range: ${h.preflopRangeClass ?? "—"}
+            ${h.preflopSizeBb ? ` · Open size: ${Number(h.preflopSizeBb).toFixed(1)}x` : ""}
+            ${h.preflopSizeEval ? ` · Size eval: ${h.preflopSizeEval}` : ""}
+          </div>
+        `;
+      }
+    } else if (h.stage === "flop") {
+      // C-bet evaluation
+      if (h.boardCards || h.boardCategory || h.cbetEval || h.sizingEval) {
+        block += `
+          <div style="margin-top:4px;opacity:.9">
+            Board: ${h.boardCards ?? "—"} (${categoryLabel(h.boardCategory)})
+          </div>
+          <div style="opacity:.9">
+            C‑bet: ${h.cbetEval ?? "—"} · Size: ${h.sizingEval ?? "—"}
+            ${h.cbetRecommendedFreq || h.sizingRecommendedRange ? ` (Rec: ${h.cbetRecommendedFreq ?? "—"} · ${h.sizingRecommendedRange ?? "—"})` : ""}
+          </div>
+        `;
+      }
+    } else if (h.stage === "turn") {
+      if (h.barrelEval || h.sizingEval) {
+        block += `
+          <div style="margin-top:4px;opacity:.9">
+            Barrel: ${h.barrelEval ?? "—"} · Size: ${h.sizingEval ?? "—"}
+            ${h.cbetRecommendedFreq || h.sizingRecommendedRange ? ` (Rec: ${h.cbetRecommendedFreq ?? "—"} · ${h.sizingRecommendedRange ?? "—"})` : ""}
+          </div>
+        `;
+      }
+    } else if (h.stage === "river") {
+      if (h.riverLineType || h.sizingEval) {
+        block += `
+          <div style="margin-top:4px;opacity:.9">
+            River: ${h.riverLineType ?? "—"} ${h.sizingEval ? `· Size: ${h.sizingEval}` : ""}
+            ${h.cbetRecommendedFreq || h.sizingRecommendedRange ? ` (Rec: ${h.cbetRecommendedFreq ?? "—"} · ${h.sizingRecommendedRange ?? "—"})` : ""}
+          </div>
+        `;
+      }
+    }
+
+    // Common finishing hands (as before)
+    if (h.handTypes && h.handTypes.length) {
+      block += `<div style="opacity:.8"><em>Common finishing hands:</em> ${h.handTypes.map(x=>`${x.name} ${x.pct.toFixed(1)}%`).join(' · ')}</div>`;
+    }
+
+    block += `</div><hr/>`;
+    html += block;
   });
 
   const n = handHistory.length || 1;
@@ -1066,161 +2217,101 @@ function showSummary() {
     <p><strong>Average equity error:</strong> ${avgEqErr.toFixed(1)}%</p>
     <p><strong>Average pot odds error:</strong> ${avgPotErr.toFixed(1)}%</p>
     <p><strong>Decision accuracy (green only):</strong> ${decisionAcc.toFixed(1)}%</p>
-    <p style="color:#95a5a6">Method: Monte–Carlo simulation with baseline population and street-by-street continuation; full 7‑card evaluation; ties share the pot.</p>
+    <p style="color:#95a5a6">Method: Monte‑Carlo simulation with baseline population (default 5 opponents) and street‑by‑street continuation; full 7‑card evaluation; ties share the pot.</p>
     <hr/>
   ` + html;
 
   summaryContent.innerHTML = html;
   summaryPanel.style.display = "block";
 }
-function updateSessionStats() {
-  if (sessionHistory.length === 0) { sessionStatsEl.textContent = "No hands played yet."; return; }
 
-  let totalEqErr = 0; let totalPotErr = 0; let greens = 0;
-  sessionHistory.forEach((h) => {
+function updateSessionStats(){
+  if (sessionHistory.length===0){ sessionStatsEl.textContent="No hands played yet."; return; }
+  let totalEqErr=0, totalPotErr=0, greens=0;
+  sessionHistory.forEach(h=>{
     totalEqErr += Math.abs(h.equityInput - h.equityActual);
     totalPotErr += Math.abs(h.potOddsInput - h.potOddsActual);
-    if (h.decisionBand === "green") greens++;
+    if (h.decisionBand==='green') greens++;
   });
-
-  const n = sessionHistory.length;
-  const avgEq = totalEqErr / n; const avgPot = totalPotErr / n; const acc = (greens / n) * 100;
+  const n=sessionHistory.length;
+  const avgEq = totalEqErr/n, avgPot = totalPotErr/n, acc=(greens/n)*100;
   sessionStatsEl.textContent = `Session – stages: ${n}, avg equity err: ${avgEq.toFixed(1)}%, avg pot err: ${avgPot.toFixed(1)}%, decision green: ${acc.toFixed(1)}%`;
 }
 
-// ====== LocalStorage, CSV & Reset ======
+// ==================== LocalStorage & CSV ====================
 const STORAGE_KEY = "poker_equity_trainer_history";
-function saveSessionHistory() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(sessionHistory)); } catch(e){ console.warn("Could not save history", e);} }
-function loadSessionHistory() { try { const raw = localStorage.getItem(STORAGE_KEY); if (!raw) return; sessionHistory = JSON.parse(raw); } catch(e){ console.warn("Could not load history", e);} }
-function clearSessionHistory() {
+function saveSessionHistory(){ try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(sessionHistory)); } catch(e){ console.warn("Could not save history", e);} }
+function loadSessionHistory(){ try{ const raw=localStorage.getItem(STORAGE_KEY); if (!raw) return; sessionHistory = JSON.parse(raw); } catch(e){ console.warn("Could not load history", e);} }
+function clearSessionHistory(){
   if (!confirm("Reset all saved statistics for this device/session?")) return;
-  try { localStorage.removeItem(STORAGE_KEY); } catch(e) { console.warn("Could not clear history", e); }
-  sessionHistory = [];
-  updateSessionStats();
-  summaryPanel.style.display = "none";
-  feedbackEl.innerHTML = "";
-  hintsEl.textContent = "";
+  try{ localStorage.removeItem(STORAGE_KEY); } catch(e){ console.warn("Could not clear history", e); }
+  sessionHistory=[]; updateSessionStats(); summaryPanel.style.display="none"; feedbackEl.innerHTML=""; hintsEl.textContent="";
 }
-function downloadCsv() {
-  if (!sessionHistory || sessionHistory.length === 0) return;
 
-  // --- CSV columns (legacy first, then new unified-betting fields) ---
+function downloadCsv(){
+  if (sessionHistory.length===0) return;
   const headers = [
-    // Legacy
-    "stage",
-    "equityInput",
-    "equityActual",
-    "potOddsInput",
-    "potOddsActual",
-    "decision",
-    "equityBand",
-    "potOddsBand",
-    "decisionBand",
-    "timeUsed",
-
-    // --- New columns for unified betting / position / KPIs (optional placeholders) ---
-    "position",
-    "preflopInRange",
-    "cbetAttempted",
-    "cbetOk",
-    "wasBarrelTurn",
-    "barrelOkTurn",
-    "wasBarrelRiver",
-    "barrelOkRiver",
-    "sizeBucket",
-    "sizeOk",
-
-    // numeric % of pot if present
-    "betPctUnified"
+    // Core
+    "stage","heroPosition","dealtHand","boardCards","boardCategory",
+    "equityInput","equityActual","potOddsInput","potOddsActual",
+    "decision","betOrRaiseLabel","sizePct",
+    "equityBand","potOddsBand","decisionBand","timeUsed",
+    // Phase 1
+    "preflopRangeClass","preflopInRange","preflopAggressor","preflopAction","preflopSizeBb","preflopSizeEval",
+    // Phase 3
+    "cbetRecommendedFreq","sizingRecommendedRange","cbetEval","barrelEval","sizingEval",
+    // Phase 4
+    "postflopRole","probeEval","riverLineType","riverMadeHand",
+    // Sim context
+    "numOpp","trials"
   ];
-
-  const rows = [headers.join(",")];
-
-  sessionHistory.forEach((h) => {
-    const legacy = [
-      h.stage ?? "",
-      safeFixed(h.equityInput, 2),
-      safeFixed(h.equityActual, 2),
-      safeFixed(h.potOddsInput, 2),
-      safeFixed(h.potOddsActual, 2),
-      h.decision ?? "",
-      h.equityBand ?? "",
-      h.potOddsBand ?? "",
-      h.decisionBand ?? "",
-      h.timeUsed == null ? "" : safeFixed(h.timeUsed, 2)
-    ];
-
-    const unified = [
-      h.position ?? "",
-      boolToCsv(h.preflopInRange),
-      boolToCsv(h.cbetAttempted),
-      h.cbetOk ?? "",
-      boolToCsv(h.wasBarrelTurn),
-      h.barrelOkTurn ?? "",
-      boolToCsv(h.wasBarrelRiver),
-      h.barrelOkRiver ?? "",
-      h.sizeBucket ?? "",
-      h.sizeOk ?? "",
-      h.betPctUnified == null ? "" : String(h.betPctUnified)
-    ];
-
-    rows.push([...legacy, ...unified].join(","));
+  const rows=[headers.join(",")];
+  sessionHistory.forEach(h=>{
+    rows.push([
+      h.stage ?? "", h.heroPosition ?? "", h.dealtHand ?? "", h.boardCards ?? "", h.boardCategory ?? "",
+      (h.equityInput ?? "").toString(), (h.equityActual ?? "").toString(), (h.potOddsInput ?? "").toString(), (h.potOddsActual ?? "").toString(),
+      h.decision ?? "", h.betOrRaiseLabel ?? "", h.sizePct ?? "",
+      h.equityBand ?? "", h.potOddsBand ?? "", h.decisionBand ?? "", (h.timeUsed==null ? "" : h.timeUsed.toFixed(2)),
+      h.preflopRangeClass ?? "", (h.preflopInRange==null ? "" : (h.preflopInRange ? "true":"false")), h.preflopAggressor ?? "", h.preflopAction ?? "",
+      (h.preflopSizeBb==null ? "" : (h.preflopSizeBb.toFixed ? h.preflopSizeBb.toFixed(1) : h.preflopSizeBb)), h.preflopSizeEval ?? "",
+      h.cbetRecommendedFreq ?? "", h.sizingRecommendedRange ?? "", h.cbetEval ?? "", h.barrelEval ?? "", h.sizingEval ?? "",
+      h.postflopRole ?? "", h.probeEval ?? "", h.riverLineType ?? "", h.riverMadeHand ?? "",
+      h.numOpp ?? "", h.trials ?? ""
+    ].join(","));
   });
-
-  const blob = new Blob([rows.join("\n")], { type: "text/csv;charset=utf-8;" });
+  const blob = new Blob([rows.join("\n")], { type:"text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url;
-  a.download = "poker_equity_trainer_history.csv";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-
-  function safeFixed(v, n) {
-    const num = Number(v);
-    return Number.isFinite(num) ? num.toFixed(n) : "";
-  }
-  function boolToCsv(v) {
-    return v == null ? "" : (v ? "true" : "false");
-  }
+  a.href = url; a.download = "poker_equity_trainer_history.csv";
+  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-// ====== SETTINGS PANEL ======
-function createSettingsPanel() {
+// ==================== Settings panel ====================
+function createSettingsPanel(){
   const btn = document.createElement("button");
-  btn.id = "settingsBtn";
-  btn.textContent = "⚙︎ Settings";
-  btn.className = "btn";
+  btn.id="settingsBtn"; btn.textContent="⚙︎ Settings"; btn.className="btn";
   newHandBtn.parentNode.insertBefore(btn, newHandBtn.nextSibling);
 
   const panel = document.createElement("div");
   panel.id = "settingsPanel";
   panel.style.cssText = "position:fixed;right:20px;top:80px;z-index:9999;background:#1f2937;color:#ecf0f1;border:1px solid #374151;border-radius:8px;padding:12px;min-width:320px;display:none;box-shadow:0 8px 24px rgba(0,0,0,.35)";
-
   panel.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <div style="font-weight:600">Trainer Settings</div>
       <button id="closeSettings" class="btn">✕</button>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-      <label>Baseline opponents</label>
-      <input type="number" id="set_playersBaseline" min="1" max="5" value="${SETTINGS.sim.playersBaseline}"/>
-
+      <label>Baseline Opponents (6‑max: use 5)</label>
+      <input type="number" id="set_playersBaseline" min="1" max="5" value="${Math.min(5, SETTINGS.sim.playersBaseline)}"/>
       <label>See Flop %</label>
       <input type="number" id="set_rateFlop" min="0" max="100" value="${Math.round(SETTINGS.sim.continueRate.flop*100)}"/>
-
       <label>See Turn %</label>
       <input type="number" id="set_rateTurn" min="0" max="100" value="${Math.round(SETTINGS.sim.continueRate.turn*100)}"/>
-
       <label>See River %</label>
       <input type="number" id="set_rateRiver" min="0" max="100" value="${Math.round(SETTINGS.sim.continueRate.river*100)}"/>
-
       <label>Range‑aware continuation</label>
       <input type="checkbox" id="set_rangeAware" ${SETTINGS.sim.rangeAwareContinuation ? 'checked' : ''}/>
-
       <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
-
       <label>Sim Quality</label>
       <select id="set_quality">
         <option ${SETTINGS.simQualityPreset==='Mobile'?'selected':''}>Mobile</option>
@@ -1228,90 +2319,125 @@ function createSettingsPanel() {
         <option ${SETTINGS.simQualityPreset==='Accurate'?'selected':''}>Accurate</option>
         <option ${SETTINGS.simQualityPreset==='Custom'?'selected':''}>Custom</option>
       </select>
-
       <label>Trials – Preflop</label>
       <input type="number" id="set_trials_pre" min="500" step="500" value="${SETTINGS.trialsByStage.preflop}"/>
-
       <label>Trials – Flop</label>
       <input type="number" id="set_trials_flop" min="500" step="500" value="${SETTINGS.trialsByStage.flop}"/>
-
       <label>Trials – Turn</label>
       <input type="number" id="set_trials_turn" min="500" step="500" value="${SETTINGS.trialsByStage.turn}"/>
-
       <label>Trials – River</label>
       <input type="number" id="set_trials_riv" min="500" step="500" value="${SETTINGS.trialsByStage.river}"/>
-
       <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
-
       <label>Add hero call to pot</label>
       <input type="checkbox" id="set_addCall" ${SETTINGS.pot.addHeroCallBetweenStreets ? 'checked' : ''}/>
-
       <label>End hand on fold</label>
       <input type="checkbox" id="set_endOnFold" ${SETTINGS.pot.endHandOnFold ? 'checked' : ''}/>
     </div>
-
-    <!-- ===== HELP / HOW IT WORKS (full guide) ===== -->
-    <details class="help-section" open>
-      <summary>📘 How the Trainer Works (Full Guide)</summary>
-      <div class="help-body">
-        <!-- (Guide content unchanged from your original) -->
-      </div>
-    </details>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+      <button id="applySettings" class="btn">Apply</button>
+    </div>
   `;
-
   document.body.appendChild(panel);
 
-  btn.addEventListener("click", () => {
-    panel.style.display = panel.style.display === "none" ? "block" : "none";
-  });
-  panel.querySelector("#closeSettings").addEventListener("click", () => { panel.style.display = "none"; });
-
-  function applyQualityPreset(presetName) {
-    const preset = TRIALS_PRESETS[presetName];
-    if (!preset) return;
+  function applyQualityPreset(presetName){
+    const preset = TRIALS_PRESETS[presetName]; if (!preset) return;
     SETTINGS.trialsByStage = { ...preset };
-    panel.querySelector("#set_trials_pre").value = SETTINGS.trialsByStage.preflop;
+    panel.querySelector("#set_trials_pre").value  = SETTINGS.trialsByStage.preflop;
     panel.querySelector("#set_trials_flop").value = SETTINGS.trialsByStage.flop;
     panel.querySelector("#set_trials_turn").value = SETTINGS.trialsByStage.turn;
-    panel.querySelector("#set_trials_riv").value = SETTINGS.trialsByStage.river;
+    panel.querySelector("#set_trials_riv").value  = SETTINGS.trialsByStage.river;
   }
 
-  panel.querySelector("#applySettings")?.addEventListener("click", () => {
-    SETTINGS.sim.playersBaseline = Math.max(1, Math.min(5, parseInt(panel.querySelector("#set_playersBaseline").value, 10) || 4));
-    SETTINGS.sim.continueRate.flop  = Math.max(0, Math.min(1, ((parseFloat(panel.querySelector("#set_rateFlop").value)  || 65) / 100)));
-    SETTINGS.sim.continueRate.turn  = Math.max(0, Math.min(1, ((parseFloat(panel.querySelector("#set_rateTurn").value)  || 55) / 100)));
-    SETTINGS.sim.continueRate.river = Math.max(0, Math.min(1, ((parseFloat(panel.querySelector("#set_rateRiver").value) || 45) / 100)));
-
+  btn.addEventListener("click", ()=> { panel.style.display = panel.style.display==="none" ? "block" : "none"; });
+  panel.querySelector("#closeSettings").addEventListener("click", ()=> { panel.style.display = "none"; });
+  panel.querySelector("#applySettings").addEventListener("click", ()=>{
+    SETTINGS.sim.playersBaseline = Math.max(1, Math.min(5, parseInt(panel.querySelector("#set_playersBaseline").value,10) || 4));
+    SETTINGS.sim.continueRate.flop  = Math.max(0, Math.min(1, (parseFloat(panel.querySelector("#set_rateFlop").value)||65)/100));
+    SETTINGS.sim.continueRate.turn  = Math.max(0, Math.min(1, (parseFloat(panel.querySelector("#set_rateTurn").value)||55)/100));
+    SETTINGS.sim.continueRate.river = Math.max(0, Math.min(1, (parseFloat(panel.querySelector("#set_rateRiver").value)||45)/100));
     SETTINGS.sim.rangeAwareContinuation = !!panel.querySelector("#set_rangeAware").checked;
-
     const chosen = panel.querySelector("#set_quality").value;
     SETTINGS.simQualityPreset = chosen;
-
-    if (chosen !== 'Custom') applyQualityPreset(chosen);
-    if (chosen === 'Custom') {
-      SETTINGS.trialsByStage.preflop = Math.max(500, parseInt(panel.querySelector("#set_trials_pre").value, 10) || 4000);
-      SETTINGS.trialsByStage.flop    = Math.max(500, parseInt(panel.querySelector("#set_trials_flop").value, 10) || 6000);
-      SETTINGS.trialsByStage.turn    = Math.max(500, parseInt(panel.querySelector("#set_trials_turn").value, 10) || 8000);
-      SETTINGS.trialsByStage.river   = Math.max(500, parseInt(panel.querySelector("#set_trials_riv").value, 10) || 12000);
-    } else {
-      applyQualityPreset(chosen);
+    if (chosen!=='Custom') applyQualityPreset(chosen);
+    else {
+      SETTINGS.trialsByStage.preflop = Math.max(500, parseInt(panel.querySelector("#set_trials_pre").value,10) || 4000);
+      SETTINGS.trialsByStage.flop    = Math.max(500, parseInt(panel.querySelector("#set_trials_flop").value,10)|| 6000);
+      SETTINGS.trialsByStage.turn    = Math.max(500, parseInt(panel.querySelector("#set_trials_turn").value,10)|| 8000);
+      SETTINGS.trialsByStage.river   = Math.max(500, parseInt(panel.querySelector("#set_trials_riv").value,10) || 12000);
     }
-
     SETTINGS.pot.addHeroCallBetweenStreets = !!panel.querySelector("#set_addCall").checked;
-    SETTINGS.pot.endHandOnFold = !!panel.querySelector("#set_endOnFold").checked;
-
+    SETTINGS.pot.endHandOnFold             = !!panel.querySelector("#set_endOnFold").checked;
     btn.textContent = "⚙︎ Settings ✓";
     setTimeout(()=>btn.textContent="⚙︎ Settings", 1200);
   });
 }
 
-// ====== Event wiring ======
-difficultySelect.addEventListener("change", () => {
-  difficulty = difficultySelect.value;
+// ==================== UI wiring (Phase 1 & 2) ====================
+function setupPhase1UI(){
+  if (positionDisc){
+    positionDisc.addEventListener('click', (e)=>{ e.stopPropagation(); if (posPopover && !posPopover.classList.contains('hidden')) { hidePosPopover(); return; } showPosPopover(); });
+    document.addEventListener('click', ()=> hidePosPopover());
+    window.addEventListener('scroll', ()=> hidePosPopover(), { passive:true });
+  }
+  if (holeCardsEl){
+    holeCardsEl.style.cursor="pointer";
+    holeCardsEl.title = "Tap to view preflop range heatmap";
+    holeCardsEl.addEventListener('click', ()=> openRangeModal());
+  }
+  if (rangeModalClose) rangeModalClose.addEventListener('click', ()=> closeRangeModal());
+  if (rangeModalOverlay) rangeModalOverlay.addEventListener('click', (e)=>{ if (e.target===rangeModalOverlay) closeRangeModal(); });
 
-  // Always reset and restart timer behaviour on difficulty change
+  if (sizePresetRow){
+    sizePresetRow.addEventListener('click', (e)=>{
+      const btn = e.target.closest('.size-bb'); if (!btn) return;
+      sizePresetRow.querySelectorAll('.pill').forEach(p=>p.classList.remove('active'));
+      btn.classList.add('active');
+      const val = parseFloat(btn.getAttribute('data-bb'));
+      heroActions.preflop.sizeBb = isFinite(val) ? val : null;
+    });
+  }
+  ["decFold","decCall","decRaise"].forEach(id=>{
+    const el=document.getElementById(id); if (!el) return;
+    el.addEventListener('change', ()=>{
+      const stage=STAGES[currentStageIndex];
+      const isPre=(stage==='preflop'); const isRaise=document.getElementById('decRaise')?.checked;
+      if (sizePresetRow) sizePresetRow.classList.toggle('hidden', !(isPre && isRaise));
+      if (sizePresetRowPost) sizePresetRowPost.classList.toggle('hidden', !(!isPre && isRaise));
+    });
+  });
+}
+function setupPhase2UI(){
+  if (sizePresetRowPost){
+    sizePresetRowPost.addEventListener('click', (e)=>{
+      const btn=e.target.closest('.size-pct'); if (!btn) return;
+      sizePresetRowPost.querySelectorAll('.pill').forEach(p=>p.classList.remove('active'));
+      btn.classList.add('active');
+      const pct=parseFloat(btn.getAttribute('data-pct'));
+      const stage=STAGES[currentStageIndex];
+      if (['flop','turn','river'].includes(stage)){
+        heroActions[stage].sizePct = isFinite(pct) ? pct : null;
+      }
+    });
+  }
+  ["decFold","decCall","decRaise"].forEach(id=>{
+    const el=document.getElementById(id); if (!el) return;
+    el.addEventListener('change', updateDecisionLabels);
+  });
+  if (guideModalClose) guideModalClose.addEventListener('click', ()=> closeGuideModal());
+  if (guideModalOverlay) guideModalOverlay.addEventListener('click', (e)=>{ if (e.target===guideModalOverlay) closeGuideModal(); });
+
+  document.addEventListener('click', (e)=>{
+    const el = e.target.closest('#boardBadgeBar'); if (!el) return;
+    const catKey = mapBoardToCategory(boardCards, holeCards);
+    openGuideModalFor(catKey);
+  });
+}
+
+// ==================== Event wiring ====================
+difficultySelect.addEventListener("change", ()=>{
+  difficulty = difficultySelect.value;
   clearTimer();
-  if (difficulty === "beginner") {
+  if (difficulty==="beginner"){
     timerRange.disabled = true;
     if (timerCountdownEl) timerCountdownEl.textContent = "No timer in Beginner Mode";
     if (kpiTimerEl) kpiTimerEl.textContent = "Time: —";
@@ -1321,33 +2447,25 @@ difficultySelect.addEventListener("change", () => {
     timerValueEl.textContent = timerSeconds;
     startTimer();
   }
-  updatePotInfo(); // refresh KPI chips
+  updatePotInfo();
   updateHintsImmediate();
 });
-timerRange.addEventListener("input", () => { timerSeconds = parseInt(timerRange.value, 10); timerValueEl.textContent = timerSeconds; });
-newHandBtn.addEventListener("click", () => { startNewHand(); });
-downloadCsvBtn.addEventListener("click", () => { downloadCsv(); });
-closeSummaryBtn.addEventListener("click", () => { summaryPanel.style.display = "none"; });
-resetStatsBtn.addEventListener("click", () => { clearSessionHistory(); });
+timerRange.addEventListener("input", ()=> { timerSeconds = parseInt(timerRange.value, 10) || 10; timerValueEl.textContent = timerSeconds; });
+newHandBtn.addEventListener("click", ()=> { startNewHand(); });
+downloadCsvBtn.addEventListener("click", ()=> { downloadCsv(); });
+closeSummaryBtn.addEventListener("click", ()=> { summaryPanel.style.display = "none"; });
+resetStatsBtn.addEventListener("click", ()=> { clearSessionHistory(); });
 
-// ====== Init ======
+// ==================== Init ====================
 (function init(){
   loadSessionHistory();
   updateSessionStats();
-
-  timerSeconds = parseInt(timerRange.value, 10);
+  timerSeconds = parseInt(timerRange.value, 10) || 10;
   timerValueEl.textContent = timerSeconds;
   difficulty = difficultySelect.value;
   timerRange.disabled = true;
   if (timerCountdownEl) timerCountdownEl.textContent = "No timer in Beginner Mode";
   createSettingsPanel();
-
-  // Optional: relax legacy radios to avoid HTML5 validation conflicts
-  document.querySelectorAll('.segmented input[name="decision"]').forEach(r => {
-    r.removeAttribute('required');
-  });
+  setupPhase1UI();
+  setupPhase2UI();
 })();
-
-// ====== Expose helpers for unified panel preview ======
-window.computeRoundedBetAndPot = computeRoundedBetAndPot;
-window.computePotOdds = computePotOdds;
