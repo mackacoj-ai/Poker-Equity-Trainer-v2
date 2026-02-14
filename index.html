@@ -5,8 +5,7 @@
   <title>Macka Poker Equity Trainer</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#1b2838" />
-
-  <!-- Icons for homescreen / PWA -->
+  <!-- Icons (optional) -->
   <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="icon-180.png" />
@@ -14,17 +13,9 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="Macka Poker" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-
-  <!-- App styles -->
   <link rel="stylesheet" href="Style.css" />
 </head>
 <body class="compact-auto">
-  <noscript>
-    <div style="padding:12px;background:#b91c1c;color:#fff;text-align:center">
-      JavaScript is required to run the Macka Poker Equity Trainer.
-    </div>
-  </noscript>
-
   <div class="app">
     <header class="app-header">
       <h1>Macka Poker Equity Trainer</h1>
@@ -37,19 +28,17 @@
             <option value="expert">Expert</option>
           </select>
         </div>
-
         <div class="control-group">
           <label for="timerRange">Timer (seconds)</label>
           <input type="range" id="timerRange" min="3" max="59" value="10" />
           <span id="timerValue">10</span>
         </div>
-
         <button id="newHandBtn" class="primary">New Hand</button>
         <!-- ⚙ Settings button is injected by Script.js next to "New Hand" -->
       </div>
     </header>
 
-    <!-- Sticky KPI bar (mobile-first) -->
+    <!-- Sticky KPI chips (mobile-first) -->
     <div class="kpi-bar" id="kpiBar" aria-live="polite">
       <span class="chip" id="kpiStage">Stage: —</span>
       <span class="chip" id="kpiPot">Pot: £0</span>
@@ -59,8 +48,15 @@
 
     <main class="table">
       <section class="cards-panel">
+        <!-- Hole Cards row with position disc + preflop range badge -->
         <div class="cards-row">
-          <h2>Hole Cards</h2>
+          <div class="row-title">
+            <h2>Hole Cards</h2>
+            <div class="pos-and-range">
+              <button id="positionDisc" class="pos-disc" type="button" title="Seat position">UTG</button>
+              <span id="preflopRangeBadge" class="badge hidden" aria-live="polite"></span>
+            </div>
+          </div>
           <div id="holeCards" class="card-row"></div>
         </div>
 
@@ -71,7 +67,7 @@
       </section>
 
       <section class="info-panel">
-        <!-- Full pot info kept for desktop; KPI bar duplicates essentials -->
+        <!-- Full pot info (desktop); KPI bar mirrors essentials for mobile -->
         <div class="pot-info desktop-only">
           <div><strong>Stage:</strong> <span id="stageLabel">—</span></div>
           <div><strong>Pot:</strong> £<span id="potSize">0</span></div>
@@ -105,29 +101,52 @@
             </div>
           </div>
 
-          <!-- Legacy segmented decision (kept for compatibility; hidden by the unified panel) -->
           <div class="form-group">
             <label>Decision</label>
             <div class="segmented" role="radiogroup" aria-label="Decision">
-              <input type="radio" name="decision" value="fold" id="decFold" />
+              <input type="radio" name="decision" value="fold" id="decFold" required />
               <label for="decFold">Fold</label>
-
               <input type="radio" name="decision" value="call" id="decCall" />
               <label for="decCall">Call</label>
-
               <input type="radio" name="decision" value="raise" id="decRaise" />
               <label for="decRaise">Raise</label>
             </div>
           </div>
 
-          <!-- Hints: summary + collapsible details -->
+          <!-- Phase 1: Preflop raise size presets -->
+          <div id="sizePresetRow" class="size-presets hidden" aria-live="polite">
+            <div class="size-presets-title">Preflop size</div>
+            <div class="size-pills" role="group" aria-label="Preflop raise size">
+              <button type="button" class="pill size-bb" data-bb="2.0">2.0x</button>
+              <button type="button" class="pill size-bb" data-bb="2.2">2.2x</button>
+              <button type="button" class="pill size-bb" data-bb="2.5">2.5x</button>
+              <button type="button" class="pill size-bb" data-bb="3.0">3.0x</button>
+              <button type="button" class="pill size-bb" data-bb="4.0">4.0x</button>
+            </div>
+          </div>
+
+          <!-- Phase 2: Postflop bet/raise size presets -->
+          <div id="sizePresetRowPost" class="size-presets hidden" aria-live="polite">
+            <div class="size-presets-title">Postflop size</div>
+            <div class="size-pills" role="group" aria-label="Postflop bet/raise size">
+              <button type="button" class="pill size-pct" data-pct="25">25%</button>
+              <button type="button" class="pill size-pct" data-pct="33">33%</button>
+              <button type="button" class="pill size-pct" data-pct="50">50%</button>
+              <button type="button" class="pill size-pct" data-pct="66">66%</button>
+              <button type="button" class="pill size-pct" data-pct="75">75%</button>
+              <button type="button" class="pill size-pct" data-pct="100">100%</button>
+              <button type="button" class="pill size-pct" data-pct="150">150%+</button>
+            </div>
+          </div>
+
+          <!-- Hints summary + collapsible details -->
           <div id="hints" class="hints"></div>
           <details class="hint-details" id="hintDetails">
             <summary>More details</summary>
             <div id="hintsDetailBody"></div>
           </details>
 
-          <!-- Desktop actions (mobile uses bottom bar) -->
+          <!-- Desktop actions -->
           <div class="desktop-only">
             <button type="submit" class="primary" id="submitStageBtn">Submit</button>
             <button type="button" class="primary hidden" id="nextStageBtn">Next Stage</button>
@@ -154,7 +173,7 @@
       </div>
     </footer>
 
-    <!-- Sticky bottom action bar (mobile-first) -->
+    <!-- Sticky bottom action bar (mobile) -->
     <div class="bottom-bar mobile-only" id="bottomBar">
       <div class="pot-quick">
         <span id="barPotOdds">Pot odds —</span>
@@ -166,11 +185,35 @@
     </div>
   </div>
 
-  <!-- Legacy app logic (dealing, MC, etc.). Must load first. -->
-  <script src="Script.js"></script>
+  <!-- Phase 1 modal: Preflop Range Heatmap (now with tabs in Phase 4) -->
+  <div id="rangeModalOverlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="rangeModalTitle">
+    <div id="rangeModal" class="modal-card">
+      <div class="modal-header">
+        <h3 id="rangeModalTitle">Preflop Ranges</h3>
+        <button id="rangeModalClose" class="btn btn-ghost" aria-label="Close">✕</button>
+      </div>
+      <div id="rangeModalBody" class="modal-body">
+        <!-- Heatmap + tabs injected by Script.js -->
+      </div>
+    </div>
+  </div>
 
-  <!-- NEW modular layer (unified betting, position disc, policies). Uses ES Modules. -->
-  <!-- Use a local web server (e.g., VS Code Live Server) so module imports work correctly. -->
-  <script type="module" src="./src/app.js"></script>
+  <!-- Phase 2 modal: C‑Bet Guide -->
+  <div id="guideModalOverlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="guideModalTitle">
+    <div id="guideModal" class="modal-card">
+      <div class="modal-header">
+        <h3 id="guideModalTitle">C‑Bet Guide</h3>
+        <button id="guideModalClose" class="btn btn-ghost" aria-label="Close">✕</button>
+      </div>
+      <div id="guideModalBody" class="modal-body">
+        <!-- Guide content injected by Script.js -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Tiny popover for position one-liner -->
+  <div id="posPopover" class="pos-popover hidden" role="tooltip" aria-live="polite"></div>
+
+  <script src="Script.js"></script>
 </body>
 </html>
