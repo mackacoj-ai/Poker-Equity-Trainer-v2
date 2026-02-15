@@ -399,6 +399,19 @@ body.compact-auto .primary{ padding:9px 14px; }
 .chip.swing-neutral { background: var(--chip-bg); color: var(--chip-text); border:1px solid #1e2a44; }
 
 
+/* Optional helper note for the range modal */
+.range-help {
+  color: #9aa3b2;
+  font-size: 0.9rem;
+  margin: 4px 0 6px 0;
+}
+.tab.disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+
+
 /* =========================================================
    Stability override (kept small) — ensures preflop heatmap
    colours win even if another stylesheet sets .cell bkg.
