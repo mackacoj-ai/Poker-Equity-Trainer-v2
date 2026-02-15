@@ -1213,7 +1213,14 @@ function openRangeModal(){
     gridContainer.innerHTML = html;
   }
 
-  rangeModalBody.innerHTML = controlsHtml;
+  // Add a tiny source badge so we know which path we are using
+   const sourceLabel = (RANGES_JSON?.open?.[currentPosition()]) ? 'JSON' : 
+                    ((typeof EXPLICIT_OPEN !== 'undefined') ? 'Explicit' : 'Hybrid');
+    rangeModalBody.innerHTML = controlsHtml + `
+  <div style="margin-bottom:6px">
+    <span class="badge info">Range source: ${sourceLabel}</span>
+  </div>;
+
   rangeModalBody.appendChild(gridContainer);
 
   // Initial render: OPEN
