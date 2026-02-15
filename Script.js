@@ -43,10 +43,14 @@ const kpiStageEl = document.getElementById("kpiStage");
 const kpiPotEl = document.getElementById("kpiPot");
 const kpiCallEl = document.getElementById("kpiToCall");
 const kpiTimerEl = document.getElementById("kpiTimer");
+// Optional chip (will be null if you didn't add it in HTML; code no-ops then)
+const kpiEquitySwingEl = document.getElementById("kpiEquitySwing");
+
 const bottomBar = document.getElementById("bottomBar");
 const barPotOdds = document.getElementById("barPotOdds");
 const barSubmit = document.getElementById("barSubmitBtn");
 const barNext = document.getElementById("barNextBtn");
+
 const hintDetails = document.getElementById("hintDetails");
 const hintsDetailBody = document.getElementById("hintsDetailBody");
 
@@ -103,7 +107,6 @@ function renderCards(){
 
 // ==================== Pot / KPI ====================
 function computePotOdds(pot, callAmount){ if (callAmount<=0) return 0; return (callAmount/(pot+callAmount))*100; }
-
 function updatePotInfo(){
   pot = toStep5(pot); toCall = toStep5(toCall);
   const stageName = STAGES[currentStageIndex].toUpperCase();
@@ -111,17 +114,14 @@ function updatePotInfo(){
   if (toCallEl) toCallEl.textContent = toCall.toFixed(0);
   if (stageLabelEl) stageLabelEl.textContent = stageName;
   if (scenarioLabelEl) scenarioLabelEl.textContent = scenario ? scenario.label : "—";
-
   if (kpiStageEl) kpiStageEl.textContent = `Stage: ${stageName}`;
   if (kpiPotEl) kpiPotEl.textContent = `Pot: £${pot.toFixed(0)}`;
   if (kpiCallEl) kpiCallEl.textContent = `To Call: £${toCall.toFixed(0)}`;
   const tl = (timeLeft==null) ? "—" : `${Math.max(0,timeLeft)}s`;
   if (kpiTimerEl) kpiTimerEl.textContent = `Time: ${tl}`;
-
   const pOdds = computePotOdds(pot, toCall);
   if (barPotOdds) barPotOdds.textContent = isFinite(pOdds) ? `Pot odds ${pOdds.toFixed(1)}%` : 'Pot odds —';
-
-  // Phase 2: keep Bet/Raise label + size rows in sync
+  // Keep Bet/Raise label + size rows in sync
   updateDecisionLabels();
 }
 
@@ -131,7 +131,7 @@ function startTimer(){
   timeLeft = timerSeconds;
   if (timerCountdownEl) timerCountdownEl.textContent = `${timeLeft}s`;
   if (kpiTimerEl) kpiTimerEl.textContent = `Time: ${Math.max(0,timeLeft)}s`;
-  timerId = setInterval(()=> {
+  timerId = setInterval(()=>{
     timeLeft -= 1;
     if (timeLeft<=0){
       if (timerCountdownEl) timerCountdownEl.textContent = "0s";
@@ -169,8 +169,7 @@ function analyzeBoard(board, hole){
     }
     return best;
   }
-
-// Local helper: does the board contain ≥2 broadway ranks (T, J, Q, K, A)?
+  // Local helper: ≥2 broadways on board?
   function boardHasManyBroadwaysLocal(boardCards){
     const BW = new Set(["T","J","Q","K","A"]);
     let cnt = 0;
@@ -180,17 +179,20 @@ function analyzeBoard(board, hole){
 
   const boardRanksCount = {}; const boardSuitsCount = {};
   board.forEach(c => { boardRanksCount[c.rank]=(boardRanksCount[c.rank]??0)+1; boardSuitsCount[c.suit]=(boardSuitsCount[c.suit]??0)+1; });
+
   const paired = Object.values(boardRanksCount).some(v=>v>=2);
   const suitCounts = Object.values(boardSuitsCount);
   const maxSuitOnBoard = suitCounts.length ? Math.max(...suitCounts) : 0;
   const suitKinds = Object.keys(boardSuitsCount).length;
+
   const mono = maxSuitOnBoard>=3;
   const twoTone = (board.length>=3 && suitKinds===2 && !mono);
   const rainbow = (board.length>=3 && suitKinds>=3 && !mono);
+
   const boardRun = longestBoardRunRanks(board);
   const isFlop = board.length===3, isTurn = board.length===4, isRiver = board.length===5;
-  let connected=false, semiConnected=false, fourToStraight=false, straightOnBoard=false;
 
+  let connected=false, semiConnected=false, fourToStraight=false, straightOnBoard=false;
   if (isFlop){
     connected = (boardRun>=3);
     if (!connected){
@@ -202,7 +204,7 @@ function analyzeBoard(board, hole){
     }
   } else {
     const rv = new Set(board.map(c=>RANK_TO_VAL[c.rank]));
-    if (rv.has(14)) rv.add(1);
+    if (rv.has(14)) rv.add(1); // wheel
     const ordered = [...rv].sort((a,b)=>a-b);
     let run=1, maxRun=1;
     for (let i=1;i<ordered.length;i++){
@@ -234,6 +236,10 @@ function analyzeBoard(board, hole){
   if ((isTurn || isRiver) && maxSuitOnBoard>=3){
     tags.push({label: isRiver ? "Flushy Board" : "Flush Possible", sev: isRiver ? "red" : "amber"});
   }
+  // Turn-only "Two to a Flush" teaching tag (front-door FDs live for suited starts)
+  if (isTurn && maxSuitOnBoard === 2) {
+    tags.push({ label: "Two to a Flush", sev: "amber" });
+  }
   if (straightOnBoard) tags.push({label:"Straight on Board", sev:"red"});
   if (fourToStraight && !straightOnBoard) tags.push({label:"4‑Straight", sev:"amber"});
   if (connected && !fourToStraight && !straightOnBoard) tags.push({label:"Connected", sev:"amber"});
@@ -245,62 +251,46 @@ function analyzeBoard(board, hole){
   if (fourToStraight || connected || semiConnected) warnings.push("Straight possibilities present.");
   if (heroFlushDraw) warnings.push("You have a flush draw.");
 
-  let drawStrength="green";
-  if (paired || mono || fourToStraight || connected || semiConnected) drawStrength="amber";
-  if ((paired && mono) || straightOnBoard) drawStrength="red";
-
-// ===== Moisture / Wetness scoring =====
-  // Build a wetnessScore from existing signals.
+  // ===== Moisture / Wetness scoring =====
   let wetnessScore = 0;
-  if (mono) wetnessScore += 3.0;          // strongest flush pressure
-  if (twoTone) wetnessScore += 1.5;       // flush possible (two suits only)
-  if (fourToStraight) wetnessScore += 2.0;// strong straight pressure
-  if (connected) wetnessScore += 1.0;     // connected ranks
-  if (semiConnected) wetnessScore += 0.5; // gapped but live straight potential
-  if (boardHasManyBroadwaysLocal(board)) wetnessScore += 0.5; // heavy broadway interaction
-  if (paired) {
-    // small nudge for low paired textures — can become tricky / dynamic on later streets
+  if (mono) wetnessScore += 3.0;
+  if (twoTone) wetnessScore += 1.5;
+  // small nudge if on turn exactly two to a suit (real FDs for suited hands)
+  if (isTurn && maxSuitOnBoard === 2) wetnessScore += 0.25;
+  if (fourToStraight) wetnessScore += 2.0;
+  if (connected) wetnessScore += 1.0;
+  if (semiConnected) wetnessScore += 0.5;
+  if (boardHasManyBroadwaysLocal(board)) wetnessScore += 0.5;
+  if (paired){
     const lowPaired = Object.entries(boardRanksCount).some(([r,v]) => v>=2 && "23456789".includes(r));
     if (lowPaired) wetnessScore += 0.5;
   }
-
-  // Ace‑high dryness adjustment:
-  // Only apply if A is present, board is rainbow, and there is no straight pressure.
-  // This makes classic A‑high rainbow flops (e.g., A74r) score as drier,
-  // without overpowering truly wet signals on A‑high connected/two‑tone boards.
+  // Ace‑high dryness adjustment (rainbow + static only)
   const hasAce = board.some(c => c.rank === "A");
   const suitsSet = new Set(board.map(c => c.suit));
   const isRainbow = (board.length >= 3) && (suitsSet.size >= 3);
   const isStatic = !connected && !fourToStraight;
-  if (hasAce && isRainbow && isStatic) {
-    wetnessScore -= 0.75;
-  }
+  if (hasAce && isRainbow && isStatic) wetnessScore -= 0.75;
 
-  // Bucketize
   let moistureBucket;
   if (wetnessScore >= 3.5) moistureBucket = "Wet";
   else if (wetnessScore >= 2.0) moistureBucket = "Semi‑wet";
   else if (wetnessScore >= 1.0) moistureBucket = "Semi‑dry";
   else moistureBucket = "Dry";
 
-  // Add a visible moisture badge (colour‑coded)
   const moistureBadgeColor =
     moistureBucket === "Wet" ? "red" :
     (moistureBucket === "Semi‑wet" ? "amber" : "green");
   tags.push({ label: moistureBucket, sev: moistureBadgeColor });
 
-return {
-    warnings,
-    heroFlushDraw,
-    drawStrength,
-    tags,
-    paired,
-    mono,
-    connected,
-    fourToStraight,
-    // new:
-    wetnessScore,
-    moistureBucket
+  let drawStrength="green";
+  if (paired || mono || fourToStraight || connected || semiConnected) drawStrength="amber";
+  if ((paired && mono) || straightOnBoard) drawStrength="red";
+
+  return {
+    warnings, heroFlushDraw, drawStrength, tags,
+    paired, mono, connected, fourToStraight,
+    wetnessScore, moistureBucket
   };
 }
 
@@ -309,7 +299,6 @@ function countRankIn(hole, board, rank){
   let n=0; hole.forEach(c=>{ if (c.rank===rank) n++; }); board.forEach(c=>{ if (c.rank===rank) n++; }); return n;
 }
 function remainingOfRank(hole, board, rank){ return Math.max(0, 4 - countRankIn(hole,board,rank)); }
-
 function describeMadeHand(hole, board){
   const score = evaluate7(hole, board);
   if (score.cat===1){
@@ -369,11 +358,13 @@ function evaluate7(hole, board){
     const bestPair = (trips.length>=2) ? trips[1] : pairs[0];
     return { cat:6, ranks:[topTrips, bestPair] };
   }
+
   // Flush
   if (suitWith5){
     const flushVals = [...cards.filter(c=>c.suit===suitWith5).map(c=>RANK_TO_VAL[c.rank])].sort((a,b)=>b-a).slice(0,5);
     return { cat:5, ranks:flushVals };
   }
+
   // Straight
   const straightHigh = highestStraightHigh(rankSet);
   if (straightHigh) return { cat:4, ranks:[straightHigh] };
@@ -422,7 +413,7 @@ function compareScores(a,b){
 function detectStraightDrawFromAllCards(allCards){
   const vals = new Set(allCards.map(c=>RANK_TO_VAL[c.rank]));
   const has = v=>vals.has(v);
-  // Open-ender: 4 consecutive starting 2..10
+  // Open-ender
   let openEnder=false;
   for (let r=2;r<=10;r++){
     if (has(r)&&has(r+1)&&has(r+2)&&has(r+3)){ openEnder=true; break; }
@@ -447,6 +438,8 @@ function estimateOuts(hole, board){
 
   let strong=0, tentative=0, outsDetail=[];
   const all = [...hole, ...board];
+
+  // Flush draws (hero-specific)
   const suitCounts = {}; all.forEach(c=>{ suitCounts[c.suit]=(suitCounts[c.suit]??0)+1; });
   const flushSuit = Object.keys(suitCounts).find(s => suitCounts[s]===4);
   if (flushSuit){
@@ -455,6 +448,8 @@ function estimateOuts(hole, board){
     else if (texture.paired){ strong+=flushOuts; outsDetail.push("Flush draw – 9 strong outs. Note: paired board (boat/quads risk)."); }
     else { strong+=flushOuts; outsDetail.push("Flush draw – 9 strong outs."); }
   }
+
+  // Straights
   const { openEnder, gutshot } = detectStraightDrawFromAllCards(all);
   if (openEnder){
     const outs = 8;
@@ -468,11 +463,13 @@ function estimateOuts(hole, board){
     else { strong+=outs; outsDetail.push("Gutshot – 4 strong outs."); }
   }
 
+  // Pairs improvement / boats, etc.
   const r1 = hole[0].rank, r2 = hole[1].rank;
   const holePair = (r1===r2);
   const boardCount = {}; board.forEach(c=>{ boardCount[c.rank]=(boardCount[c.rank]??0)+1; });
   const r1On = boardCount[r1]??0, r2On = boardCount[r2]??0;
   const havePair = holePair || r1On>0 || r2On>0;
+
   if (!havePair){
     const outsR1 = Math.max(0, 3 - r1On);
     const outsR2 = Math.max(0, 3 - r2On);
@@ -517,19 +514,21 @@ function updateHintsImmediate(){
   const texture = outsInfo.texture;
   const boardTags = (texture.tags ?? []).map(t=>`<span class="badge ${t.sev}">${t.label}</span>`).join(' ');
   const made = describeMadeHand(holeCards, boardCards);
+
   let nutsBadge = "";
   if (boardCards.length===5){
-    // absolute nuts check (fast bail-out): sample-free quick check via scanning remaining deck
     const nuts = isAbsoluteNutsOnRiver(holeCards, boardCards);
     nutsBadge = nuts.abs ? `<span class="badge green">NUTS</span>` : `<span class="badge amber">Not nuts</span>`;
   } else if (boardCards.length>=3){
     const prob = isProbableNutsPreRiver(holeCards, boardCards, 800);
     nutsBadge = prob.likely ? `<span class="badge green">Likely Nuts</span>` : `<span class="badge amber">Beatable</span>`;
   }
+
   const totalOuts = outsInfo.strong + outsInfo.tentative;
   let approxEquity=null;
   if (stage==="flop") approxEquity = totalOuts*4;
   if (stage==="turn") approxEquity = totalOuts*2;
+
   const outsLines = [];
   outsLines.push(`<div><strong>Strong outs:</strong> ${outsInfo.strong}</div>`);
   outsLines.push(`<div><strong>Tentative outs:</strong> ${outsInfo.tentative}</div>`);
@@ -555,6 +554,7 @@ function updateHintsImmediate(){
       ${potLine}
     </div>
   `;
+
   if (difficulty==="beginner" || difficulty==="intermediate"){
     hintsEl.innerHTML = summaryHtml;
     if (hintsDetailBody) hintsDetailBody.innerHTML = detailsHtml;
@@ -614,7 +614,6 @@ const CAT_NAME = {
   5:'Flush', 4:'Straight', 3:'Three of a Kind',
   2:'Two Pair', 1:'One Pair', 0:'High Card'
 };
-
 const SETTINGS = {
   sim: {
     playersBaseline: 5,
@@ -631,11 +630,10 @@ const SETTINGS = {
   trialsByStage: { preflop: 4000, flop: 6000, turn: 8000, river: 12000 }
 };
 const TRIALS_PRESETS = {
-  Mobile: { preflop: 2000, flop: 4000, turn: 6000, river: 8000 },
+  Mobile:   { preflop: 2000, flop: 4000, turn: 6000, river: 8000 },
   Balanced: { preflop: 4000, flop: 6000, turn: 8000, river: 12000 },
   Accurate: { preflop: 8000, flop: 12000, turn: 16000, river: 20000 }
 };
-
 function popRandomCard(arr){ const i=Math.floor(Math.random()*arr.length); return arr.splice(i,1)[0]; }
 function preflopWeight(c1,c2){
   const v1=RANK_TO_VAL[c1.rank], v2=RANK_TO_VAL[c2.rank];
@@ -660,7 +658,7 @@ function drawBiasedOpponentHand(d){
     if (Math.random()<=preflopWeight(c1,c2)){
       const hi=Math.max(i,j), lo=Math.min(i,j);
       const second = d.splice(hi,1)[0];
-      const first  = d.splice(lo,1)[0];
+      const first = d.splice(lo,1)[0];
       return [first,second];
     }
   }
@@ -676,8 +674,10 @@ function villainConnected(hole, boardAtStreet){
   const all = [...hole, ...boardAtStreet];
   const suitCounts = {}; all.forEach(c=>{ suitCounts[c.suit]=(suitCounts[c.suit]??0)+1; });
   const hasFD = Object.values(suitCounts).some(v=>v===4);
+
   const byRankB = {}; boardAtStreet.forEach(c=>{ byRankB[c.rank]=(byRankB[c.rank]??0)+1; });
   const pairWithBoard = byRankB[hole[0].rank]>0 || byRankB[hole[1].rank]>0 || (hole[0].rank===hole[1].rank);
+
   const vals = new Set(all.map(c=>RANK_TO_VAL[c.rank])); if (vals.has(14)) vals.add(1);
   let oesd=false;
   for (let start=1; start<=10; start++){
@@ -694,6 +694,7 @@ function sampleShowdownOpponents(baselineCount, board, maybeOppHands, maybeDeck)
   const rates = SETTINGS.sim.continueRate;
   const oppHands = maybeOppHands || [];
   const d = maybeDeck;
+
   function effectiveKeepProbFor(opIdx, street){
     let p = rates[street];
     if (SETTINGS.sim.rangeAwareContinuation && oppHands[opIdx] && d){
@@ -709,6 +710,7 @@ function sampleShowdownOpponents(baselineCount, board, maybeOppHands, maybeDeck)
     }
     return Math.max(0, Math.min(1, p));
   }
+
   const survivors = [];
   for (let i=0;i<baselineCount;i++){
     let alive=true;
@@ -734,6 +736,7 @@ function computeEquityStats(hole, board){
   const stage = stageFromBoard(board);
   const trials = SETTINGS.trialsByStage[stage] ?? 4000;
   const BASE_OPP = SETTINGS.sim.playersBaseline;
+
   let wins=0, ties=0, losses=0; let equityAcc=0;
   const catCount = new Map();
 
@@ -741,6 +744,7 @@ function computeEquityStats(hole, board){
     const simDeck = createDeck().filter(c => !containsCard(hole,c) && !containsCard(board,c));
     const opponents = [];
     for (let i=0;i<BASE_OPP;i++) opponents.push(drawBiasedOpponentHand(simDeck));
+
     const survivorsIdx = sampleShowdownOpponents(BASE_OPP, board, opponents, simDeck);
     const survivors = survivorsIdx.map(i => opponents[i]);
     if (survivors.length===0 && BASE_OPP>0) survivors.push(opponents[0]);
@@ -796,12 +800,11 @@ const POSITIONS6 = ["UTG","HJ","CO","BTN","SB","BB"];
 let heroPosIdx = 0;
 let preflopAggressor = null;
 let dealtHandStr = "";
-
 const heroActions = {
   preflop: { action:null, sizeBb:null },
-  flop:    { action:null, sizePct:null, cbet:null },
-  turn:    { action:null, sizePct:null, barrel:null },
-  river:   { action:null, sizePct:null, barrel:null }
+  flop: { action:null, sizePct:null, cbet:null },
+  turn: { action:null, sizePct:null, barrel:null },
+  river: { action:null, sizePct:null, barrel:null }
 };
 
 // DOM for Phase 1/2/4
@@ -815,18 +818,17 @@ const rangeModalClose = document.getElementById('rangeModalClose');
 const rangeModalBody = document.getElementById('rangeModalBody');
 
 const guideModalOverlay = document.getElementById('guideModalOverlay');
-const guideModalClose   = document.getElementById('guideModalClose');
-const guideModalBody    = document.getElementById('guideModalBody');
+const guideModalClose = document.getElementById('guideModalClose');
+const guideModalBody = document.getElementById('guideModalBody');
 
 const posPopover = document.getElementById('posPopover');
-
 const POS_ONE_LINERS = {
   UTG: "Under The Gun — earliest preflop, often out of position postflop.",
-  HJ:  "Hi-Jack — mid-late seat; stronger than UTG, weaker than CO/BTN.",
-  CO:  "Cutoff — late position; play wider, pressure blinds.",
+  HJ: "Hi-Jack — mid-late seat; stronger than UTG, weaker than CO/BTN.",
+  CO: "Cutoff — late position; play wider, pressure blinds.",
   BTN: "Button — last to act postflop; biggest positional edge.",
-  SB:  "Small Blind — invested but out of position; tighten up opens.",
-  BB:  "Big Blind — closes preflop action; defend wide vs small opens."
+  SB: "Small Blind — invested but out of position; tighten up opens.",
+  BB: "Big Blind — closes preflop action; defend wide vs small opens."
 };
 
 // Hybrid ranges (Open)
@@ -840,9 +842,21 @@ const HYBRID_RANGES = {
   SB:  { open:["22+","A2s+","K9s+","Q9s+","J9s+","T9s-65s","A2o+","KTo+","QTo+","JTo"], mix:[] }
 };
 
+// ===== EXPLICIT OPEN RANGES (omitted here for brevity – keep your existing block) =====
+// ... (keep your EXPLICIT_OPEN block exactly as you have it) ...
+
 // Use explicit open sets first; if a seat isn't explicitly defined, fall back to hybrid tokens.
+// **** MODIFIED to prefer JSON frequencies when loaded ****
 function getClassMapForSeat(seat){
-  const exp = EXPLICIT_OPEN?.[seat];
+  // 1) Prefer imported JSON if present
+  try{
+    if (RANGES_JSON?.open?.[seat]){
+      return mapFromFreqBucket(RANGES_JSON.open[seat]); // defined later in loader section
+    }
+  }catch(e){/* fallback */ }
+
+  // 2) Your explicit-first logic
+  const exp = (typeof EXPLICIT_OPEN !== 'undefined') ? EXPLICIT_OPEN[seat] : undefined;
   if (exp && (exp.OPEN_GREEN?.size || exp.OPEN_AMBER?.size)) {
     const map = new Map();
     for (let i = 0; i < RANKS_ASC.length; i++) {
@@ -860,271 +874,20 @@ function getClassMapForSeat(seat){
     }
     return map;
   }
-  // Fallback to your hybrid token-driven masks
+  // 3) Fallback to hybrid tokens
   return buildClassMapForPos(seat);
 }
 
-/* ============================================================
-   EXPLICIT OPEN RANGES (RFI • 6-max • ~100bb) — GREEN / AMBER
-   - GREEN = pure/mostly-pure opens
-   - AMBER = mixed / low-frequency opens (kept from earlier suggestion)
-   - Built with deterministic helpers (no regex/token parsing).
-   Paste this right under your // Hybrid ranges (Open) section.
-   ============================================================ */
+// ---------- Helpers for explicit block (keep your existing helper functions) ----------
+// ... (keep addPairs/addAllSuitedBroadways/... etc) ...
 
-// ---------- Helpers (deterministic) ----------
-const BW = ["A","K","Q","J","T"]; // broadway ranks
-function rIdx(r){ return RANKS_ASC.indexOf(r); } // smaller index = stronger (A=0 ... 2=12)
-
-// Add AA..minPair (e.g., minPair='2' or '22' -> down to 22)
-function addPairs(set, minPair="22"){
-  const min = (minPair.length===2 ? minPair[0] : minPair);
-  const stop = rIdx(min);
-  for (let i=0; i<=stop; i++) {
-    const rr = RANKS_ASC[i];
-    set.add(rr+rr);
-  }
-}
-
-// Add all suited broadways (AKs, AQs, ..., KQs, KJs, ..., QJs, QTs, JTs)
-function addAllSuitedBroadways(set){
-  for (let i=0;i<BW.length;i++){
-    for (let j=i+1;j<BW.length;j++){
-      set.add(BW[i] + BW[j] + 's');
-    }
-  }
-}
-// Add all offsuit broadways (AKo, AQo, ..., JTo)
-function addAllOffsuitBroadways(set){
-  for (let i=0;i<BW.length;i++){
-    for (let j=i+1;j<BW.length;j++){
-      set.add(BW[i] + BW[j] + 'o');
-    }
-  }
-}
-// Add specific offsuit broadway minima, e.g., KTo+, QTo+, JTo (used for SB/BB text)
-function addMostOffsuitBroadways_KTo_QTo_JTo(set){
-  set.add("KTo"); set.add("KJo"); set.add("KQo");
-  set.add("QTo"); set.add("QJo");
-  set.add("JTo");
-}
-// Add offsuit ATo+ (ATo, AJo, AQo, AKo)
-function addAToPlus(set){
-  set.add("ATo"); set.add("AJo"); set.add("AQo"); set.add("AKo");
-}
-// Add offsuit A2o+ up to AKo
-function addA2oPlus(set){
-  for (let i=rIdx("K"); i<=rIdx("2"); i++){ // K..2 (descending indices)
-    const lo = RANKS_ASC[i];
-    set.add("A" + lo + "o");
-    if (lo==="K") break; // stops at AKo
-  }
-}
-// Add offsuit A8o+ (A8o..AKo)
-function addA8oPlus(set){
-  for (let i=rIdx("K"); i<=rIdx("8"); i++){
-    const lo = RANKS_ASC[i];
-    set.add("A" + lo + "o");
-    if (lo==="K") break;
-  }
-}
-// Add suited A2s..A5s
-function addA2s_to_A5s(set){
-  ["5","4","3","2"].forEach(lo => set.add("A"+lo+"s"));
-}
-// Add all suited Axs (A2s..AKs)
-function addAllAxs(set){
-  for (let i=rIdx("K"); i<=rIdx("2"); i++){
-    const lo = RANKS_ASC[i];
-    set.add("A" + lo + "s");
-    if (lo==="K") break; // done at AKs
-  }
-}
-
-// Suited connectors inclusive range, e.g., T9s–54s; or down to 32s
-function addSuitedConnectorsRange(set, start="T9", end="54"){
-  const sHi = start[0], sLo = start[1];
-  const eHi = end[0],   eLo = end[1];
-  // Validate adjacency (connector = next rank down)
-  let iStart = rIdx(sHi), iEnd = rIdx(eHi);
-  for (let i=iStart; i<=rIdx("3"); i++){ // walk down until 32
-    const hi = RANKS_ASC[i], lo = RANKS_ASC[i+1];
-    if (!lo) break;
-    set.add(hi + lo + 's');
-    if (hi===eHi && lo===eLo) break;
-  }
-}
-// Suited gappers inclusive range, e.g., 97s–64s (one-gap)
-function addSuitedGappersRange(set, startHi="9", endHi="6"){
-  let iStart = rIdx(startHi), iEnd = rIdx(endHi);
-  for (let i=iStart; i<=iEnd; i++){
-    const hi = RANKS_ASC[i], mid = RANKS_ASC[i+1], lo = RANKS_ASC[i+2];
-    if (!lo) break;
-    set.add(hi + lo + 's'); // e.g., 9 & 7 => "97s"
-  }
-}
-// Suited connectors down to a low pair like "32s" (T9s..32s)
-function addSuitedConnectorsDownTo(set, end="32"){
-  const eHi = end[0], eLo = end[1];
-  for (let i=rIdx("T"); i<=rIdx("3"); i++){
-    const hi = RANKS_ASC[i], lo = RANKS_ASC[i+1];
-    if (!lo) break;
-    set.add(hi + lo + 's');
-    if (hi===eHi && lo===eLo) break;
-  }
-}
-// Convenience: add explicit offsuit connectors list
-function addOffsuitConnectorsList(set, codes=["T9o","98o","87o"]){
-  codes.forEach(c => set.add(c));
-}
-
-// ---------- Build explicit GREEN/AMBER per seat from your spec ----------
-// We keep the AMBER suggestions we used earlier, then remove any overlap with GREEN.
-const EXPLICIT_OPEN = {
-  UTG: {
-    OPEN_GREEN: (()=>{ // ~14–16%
-      const g = new Set();
-      addPairs(g, "22");                         // 22+
-      // Broadways (offsuit): AJo+, KQo
-      g.add("AJo"); g.add("AQo"); g.add("AKo"); g.add("KQo");
-      // Suited broadways: ATs+, KTs+, QTs+, JTs
-      ["T","J","Q","K"].forEach(lo => g.add("A"+lo+"s")); // ATs..AKs
-      g.add("KTs"); g.add("KJs"); g.add("KQs");
-      g.add("QTs"); g.add("QJs");
-      g.add("JTs");
-      // Suited Aces: A2s–A5s
-      addA2s_to_A5s(g);
-      // Suited connectors: 98s, 87s, 76s
-      ["98s","87s","76s"].forEach(c=>g.add(c));
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["A5s","A4s","KJs","QJs","KQo"]) // earlier amber (dup will be removed below)
-  },
-
-  HJ: {
-    OPEN_GREEN: (()=>{ // ~18–20%
-      const g = new Set();
-      addPairs(g, "22");
-      // Broadways
-      addAToPlus(g);                 // ATo+
-      g.add("KJo"); g.add("KQo");    // KJo+
-      g.add("QJo");                  // QJo
-      ["T","J","Q","K"].forEach(lo => g.add("A"+lo+"s")); // ATs+
-      g.add("KTs"); g.add("KJs"); g.add("KQs");
-      g.add("QTs"); g.add("QJs");
-      g.add("JTs");
-      // Suited Aces: A2s–A5s
-      addA2s_to_A5s(g);
-      // Suited connectors: T9s–65s
-      addSuitedConnectorsRange(g, "T9", "65");
-      // Suited gappers: 97s, 86s
-      ["97s","86s"].forEach(c=>g.add(c));
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["A4s","A3s","A2s","KTs","QTs","JTs","97s","87s","76s","AJo"])
-  },
-
-  CO: {
-    OPEN_GREEN: (()=>{ // ~26–28%
-      const g = new Set();
-      addPairs(g, "22");
-      // Broadways: ATo+, KTo+, QTo+, JTo; all suited broadways
-      addAToPlus(g);
-      g.add("KTo"); g.add("KJo"); g.add("KQo");
-      g.add("QTo"); g.add("QJo");
-      g.add("JTo");
-      addAllSuitedBroadways(g);
-      // Suited Aces: A2s–A5s
-      addA2s_to_A5s(g);
-      // Suited connectors: T9s–54s
-      addSuitedConnectorsRange(g, "T9", "54");
-      // Suited gappers: 97s–64s
-      addSuitedGappersRange(g, "9", "6");
-      // Offsuit Aces: A8o+
-      addA8oPlus(g);
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["AJo","ATo","KTo","QTo","J9s","T8s","97s","54s"])
-  },
-
-  BTN: {
-    OPEN_GREEN: (()=>{ // ~45–50%
-      const g = new Set();
-      addPairs(g, "22");
-      // Broadways: ALL offsuit & suited
-      addAllOffsuitBroadways(g);
-      addAllSuitedBroadways(g);
-      // Offsuit Aces: A2o+
-      addA2oPlus(g);
-      // Suited Aces: ALL Axs
-      addAllAxs(g);
-      // Suited connectors: T9s–32s
-      addSuitedConnectorsDownTo(g, "32");
-      // Suited gappers: 97s–42s
-      addSuitedGappersRange(g, "9", "4");
-      // Offsuit connectors: T9o, 98o, 87o
-      addOffsuitConnectorsList(g, ["T9o","98o","87o"]);
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["K8s","Q8s","J7s","T7s","A9o","K9o","Q9o"])
-  },
-
-  SB: {
-    OPEN_GREEN: (()=>{ // ~35–40% (raise-or-fold; modern)
-      const g = new Set();
-      addPairs(g, "22");
-      // Aces
-      addA2oPlus(g);     // A2o+
-      addAllAxs(g);      // all Axs
-      // Suited broadways: ALL
-      addAllSuitedBroadways(g);
-      // Most offsuit broadways: KTo+, QTo+, JTo
-      addMostOffsuitBroadways_KTo_QTo_JTo(g);
-      // Suited connectors: T9s–54s
-      addSuitedConnectorsRange(g, "T9", "54");
-      // Suited gappers: 97s–64s
-      addSuitedGappersRange(g, "9", "6");
-      // Offsuit connectors: T9o, 98o
-      addOffsuitConnectorsList(g, ["T9o","98o"]);
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["AJo","KJo","QJo","J9s","T8s","76s"]) // kept from earlier
-  },
-
-  BB: {
-    // If everyone folds to BB & you raise (rare), use a wide but slightly tighter than SB set.
-    OPEN_GREEN: (()=>{ 
-      const g = new Set();
-      addPairs(g, "22");
-      addAllSuitedBroadways(g);
-      addMostOffsuitBroadways_KTo_QTo_JTo(g); // "most offsuit broadways"
-      addA2oPlus(g);      // A2o+
-      addAllAxs(g);       // all Axs
-      addSuitedConnectorsRange(g, "T9", "54");
-      addSuitedGappersRange(g, "9", "6");
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["A9s","A8s","KJs","QTs","J9s","98s"])
-  }
-};
-
-// Ensure AMBER doesn’t duplicate GREEN (for cleaner coloring)
-(function deDupeAmber(){
-  Object.values(EXPLICIT_OPEN).forEach(seat=>{
-    if (!seat || !seat.OPEN_GREEN || !seat.OPEN_AMBER) return;
-    for (const code of seat.OPEN_GREEN) {
-      if (seat.OPEN_AMBER.has(code)) seat.OPEN_AMBER.delete(code);
-    }
-  });
-})();
-
-// Phase 4: 3-bet & Defend masks
+// ===== 3-bet & Defend masks (hybrid) =====
 const HYBRID_3BET_RANGES = {
   BTN: {
     CO: { open:["QQ+","AKo","AQs+","KQs","AJo"], mix:["TT-JJ","ATs"] },
     HJ: { open:["QQ+","AKo","AQs+","KQs"], mix:["JJ","ATs","KJs"] },
     UTG:{ open:["QQ+","AKo","AQs+"], mix:["JJ","KQs"] },
-    SB: { open:["JJ+","AKo","AQs+"], mix:["AJo","KQs"] }
+    SB:  { open:["JJ+","AKo","AQs+"], mix:["AJo","KQs"] }
   },
   SB: {
     BTN: { open:["JJ+","AKo","AQs+","KQs","AJo"], mix:["TT","ATs","KJs"] },
@@ -1152,80 +915,57 @@ const HYBRID_DEFEND_RANGES = {
   CO:  { open:["22+","A2s+","K8s+","Q9s+","J9s+","T9s-65s","A8o+","KJo+","QJo"], mix:["KTo","QTo"] },
   HJ:  { open:["22+","A2s+","K9s+","QTs+","JTs-76s","A9o+","KQo"], mix:["KJo","QJo"] },
   UTG: { open:["22+","A3s+","KTs+","QJs","JTs-87s","AJo+","KQo"], mix:["ATo","KJo"] },
-  SB:  { open:["—"], mix:["—"] } // note: SB defend is special; often 3-bet/fold vs late opens
+  SB:  { open:["—"], mix:["—"] } // SB defend special; often 3-bet/fold vs late opens
 };
 
-// Normalize a token (e.g., "ATs-A5s", "A2o+", "TT+") into explicit hand codes.
-// Works with:
-//  - Pairs:  "TT+", "99"
-//  - Suited: "AQs+", "ATs-A5s", "T9s-54s", "KQs"
-//  - Offsuit:"A2o+", "KQo"
-// Notes:
-//  - RANKS_ASC = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"] (high -> low)
-//  - RANK_INDEX maps rank -> index in that array (smaller index = stronger rank).
-function expandToken(token){
-  token = token.replace(/[–—]/g, '-').trim();
+// ===== expandToken POLYFILL (deterministic, supports your tokens) =====
+// Requires RANKS_ASC (["A","K","Q","J","T","9","8","7","6","5","4","3","2"])
+// and RANK_INDEX (rank -> index in RANKS_ASC; smaller index = stronger)
+(function ensureExpandToken(){
+  if (typeof expandToken === 'function') return; // if already defined elsewhere, keep it
 
-  // ---------- 1) PAIRS with "+" e.g., "TT+" ----------
-  if (/^([2-9TJQKA])\1\+$/.test(token)) {
-    const hi = token[0];                 // e.g., 'T'
-    const startIdx = RANKS_ASC.indexOf(hi);
-    // From AA down to TT: indices 0..startIdx inclusive
-    return RANKS_ASC.slice(0, startIdx + 1).map(r => r + r);
-  }
+  // Helpers
+  const RA = (typeof RANKS_ASC !== 'undefined') ? RANKS_ASC
+           : ["A","K","Q","J","T","9","8","7","6","5","4","3","2"];
+  const RI = (typeof RANK_INDEX !== 'undefined')
+           ? RANK_INDEX
+           : Object.fromEntries(RA.map((r,i)=>[r,i]));
 
-  // ---------- 2) Single PAIR e.g., "99" ----------
-  if (/^([2-9TJQKA])\1$/.test(token)) {
-    return [token];
-  }
-
-  // ---------- 3) SUITED / OFFSUIT with "+" e.g., "A2o+", "K9s+" ----------
-  // Meaning: fix the first rank (hi) and sweep the second rank from 'lo' up to just below 'hi'.
-  if (/^[2-9TJQKA]{2}[so]\+$/.test(token)) {
-    const hi  = token[0];
-    const lo0 = token[1];
-    const sfx = token[2]; // 's' or 'o'
-    const hiIdx = RANK_INDEX[hi];      // e.g., 'A' -> 0
-    const loIdx0 = RANK_INDEX[lo0];    // e.g., '2' -> 12
-    const stopAt = hiIdx + 1;          // sweep down to just under 'hi' (e.g., A -> stop at K (idx 1))
+  function isRank(x){ return /^[2-9TJQKA]$/.test(x); }
+  function pairCodesFrom(hi){ // "TT+" --> AA..TT
+    const start = RA.indexOf(hi);
     const out = [];
-    // Walk indices DOWN: lo0, then stronger kickers approaching 'hi', but NOT past stopAt
-    for (let i = loIdx0; i >= stopAt; i--) {
-      const kicker = RANKS_ASC[i];
-      out.push(hi + kicker + sfx);
+    for (let i=0;i<=start;i++) out.push(RA[i]+RA[i]);
+    return out;
+  }
+  function plusLooper(hi, lo0, sfx){ // A2o+ -> AKo..A2o   ; K9s+ -> KQs..K9s
+    const hiIdx = RI[hi];
+    const stopAt = hiIdx + 1; // stop just under hi (A -> stop at K)
+    const out = [];
+    for (let i = RI[lo0]; i >= stopAt; i--){
+      const lo = RA[i];
+      if (RI[hi] < RI[lo]) out.push(hi + lo + sfx);
     }
     return out;
   }
-
-  // ---------- 4) RANGED SUITED AX/Broadway e.g., "ATs-A5s" ----------
-  if (/^[2-9TJQKA]{2}s-[2-9TJQKA]{2}s$/.test(token)) {
-    const hi      = token[0];          // 'A' in "ATs-A5s"
-    const loStart = token[1];          // 'T'
-    const loEnd   = token[4];          // '5'
-    const startIdx = RANKS_ASC.indexOf(loStart);
-    const endIdx   = RANKS_ASC.indexOf(loEnd);
+  function suitedRangeATsToA5s(hi, loStart, loEnd){ // ATs-A5s
     const out = [];
-    for (let i = startIdx; i <= endIdx; i++) {
-      const lo = RANKS_ASC[i];
-      if (RANK_INDEX[hi] < RANK_INDEX[lo]) out.push(hi + lo + 's');
+    for (let i = RI[loStart]; i <= RI[loEnd]; i++){
+      const lo = RA[i];
+      if (RI[hi] < RI[lo]) out.push(hi + lo + 's');
     }
     return out;
   }
-
-  // ---------- 5) RANGED SUITED CONNECTORS e.g., "T9s-54s" ----------
-  if (/^[2-9TJQKA][2-9TJQKA]s-[2-9TJQKA][2-9TJQKA]s$/.test(token)) {
-    const a = token.slice(0, 3);   // e.g., T9s
-    const b = token.slice(4, 7);   // e.g., 54s
-    const seq = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"]; // high -> low
-
-    // Find start like "T9s" in the descending chain; then move down until we hit "54s"
-    let out = [];
+  function suitedConnectorsRange(a, b){ // T9s-54s
+    const out = [];
+    // a = T9s ; b = 54s. We walk downwards: T9, 98, 87, 76, 65, 54
+    const seq = RA; // A..2
     let startFound = false;
-    for (let i = 0; i < seq.length - 1; i++) {
+    for (let i=0; i<seq.length-1; i++){
       const hi = seq[i], lo = seq[i+1];
       const code = hi + lo + 's';
-      if (!startFound) {
-        if (code === a) { startFound = true; out.push(code); }
+      if (!startFound){
+        if (code === a){ startFound = true; out.push(code); }
       } else {
         out.push(code);
         if (code === b) break;
@@ -1234,23 +974,70 @@ function expandToken(token){
     return out;
   }
 
-  // ---------- 6) Single suited/offsuit like "KQs", "QJo" ----------
-  if (/^[2-9TJQKA]{2}[so]$/.test(token)) {
-    const hi = token[0], lo = token[1];
-    if (RANK_INDEX[hi] < RANK_INDEX[lo]) return [token]; // ensure hi > lo by rank strength
-    return [];
-  }
+  // The polyfill
+  window.expandToken = function expandToken(token){
+    token = (token||"").trim().toUpperCase().replace(/[–—]/g,'-');
+    const out = [];
 
-  // ---------- 7) Edge fallback: raw two-rank "AK" (rare) ----------
-  if (/^[2-9TJQKA]{2}$/.test(token)) return [token];
+    // 1) Pairs with "+" e.g., "TT+"
+    if (/^([2-9TJQKA])\1\+$/.test(token)) {
+      const hi = token[0];
+      return pairCodesFrom(hi);
+    }
 
-  return [];
-}
+    // 2) Single pair e.g., "99"
+    if (/^([2-9TJQKA])\1$/.test(token)) {
+      return [token];
+    }
+
+    // 3) Single suited/offsuit e.g., "KQs", "QJo"
+    if (/^[2-9TJQKA]{2}[so]$/.test(token)) {
+      const hi = token[0], lo = token[1];
+      if (!isRank(hi) || !isRank(lo)) return [];
+      if (RI[hi] < RI[lo]) return [token];
+      return [];
+    }
+
+    // 4) Raw two-rank like "AK" (rare)
+    if (/^[2-9TJQKA]{2}$/.test(token)) {
+      const hi = token[0], lo = token[1];
+      if (RI[hi] < RI[lo]) return [token]; // treat as unspecified suitedness
+      return [];
+    }
+
+    // 5) Suited/offsuit with "+" e.g., "A2o+", "K9s+"
+    if (/^[2-9TJQKA]{2}[so]\+$/.test(token)) {
+      const hi = token[0], lo0 = token[1], sfx = token[2];
+      return plusLooper(hi, lo0, sfx);
+    }
+
+    // 6) Suited range "ATs-A5s"
+    if (/^[2-9TJQKA]{2}s-[2-9TJQKA]{2}s$/.test(token)) {
+      const hi = token[0];
+      const loStart = token[1];
+      const loEnd   = token[4];
+      return suitedRangeATsToA5s(hi, loStart, loEnd);
+    }
+
+    // 7) Suited connectors "T9s-54s"
+    if (/^[2-9TJQKA][2-9TJQKA]s-[2-9TJQKA][2-9TJQKA]s$/.test(token)) {
+      const a = token.slice(0,3); // e.g., T9s
+      const b = token.slice(4,7); // e.g., 54s
+      return suitedConnectorsRange(a,b);
+    }
+
+    // Fallback: unknown pattern -> []
+    return out;
+  };
+})();
+
+// Normalize a token -> explicit hand codes (keep your expandToken implementation)
+// ... (keep your expandToken and builders) ...
 
 function buildClassMapForPos(pos){
   const def = HYBRID_RANGES[pos] || {open:[], mix:[]};
   const openSet = new Set(def.open.flatMap(expandToken));
-  const mixSet  = new Set(def.mix.flatMap(expandToken));
+  const mixSet = new Set(def.mix.flatMap(expandToken));
   return buildClassMapFromSets(openSet, mixSet);
 }
 function buildClassMapFromSets(openSet, mixSet){
@@ -1284,7 +1071,7 @@ function heroHandCode(){
 function classifyHeroHandAtPosition(){
   const code = heroHandCode();
   const seat = currentPosition();
-  const clsMap = getClassMapForSeat(seat);   // <— explicit-first
+  const clsMap = getClassMapForSeat(seat);
   const cls = clsMap.get(code) || 'fold';
   return (cls === 'open') ? 'Open' : (cls === 'mix' ? 'Mix' : 'Fold');
 }
@@ -1303,6 +1090,7 @@ function setPreflopBadge(){
   else preflopRangeBadge.classList.add('red');
 }
 
+// ==================== Range Modal (Open / 3bet / Defend) ====================
 function openRangeModal(){
   if (!rangeModalOverlay || !rangeModalBody) return;
   const seat = currentPosition();
@@ -1324,14 +1112,13 @@ function openRangeModal(){
       </div>
     </div>
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
-      <div><strong>Seat:</strong> ${seat} &nbsp; <strong>Hybrid baseline</strong> (solver‑inspired, simplified)</div>
+      <div><strong>Seat:</strong> ${seat} <strong>Hybrid baseline</strong> (solver‑inspired, simplified)</div>
       <div><span class="badge green">Open</span> <span class="badge amber">Mix</span> <span class="badge red">Fold</span></div>
     </div>
   `;
 
   const gridContainer = document.createElement('div');
   gridContainer.className = 'range-grid';
-
   const NO_DATA_HTML = `
     <div style="margin:.5rem 0;color:#9aa3b2">
       No data for this (seat, mode, vs) combination yet. Choose a different 'vs' or switch mode.
@@ -1340,43 +1127,62 @@ function openRangeModal(){
 
   function classMapFromLists(lists){
     if (!lists) return null;
-    const openSet = new Set((lists.open  ?? []).flatMap(expandToken));
-    const mixSet  = new Set((lists.mix   ?? []).flatMap(expandToken));
-    // if both sets are empty → return null to show "No data"
+    const openSet = new Set((lists.open ?? []).flatMap(expandToken));
+    const mixSet = new Set((lists.mix ?? []).flatMap(expandToken));
     if (openSet.size===0 && mixSet.size===0) return null;
     return buildClassMapFromSets(openSet, mixSet);
   }
 
- function classMapOpen() {
-  const exp = EXPLICIT_OPEN[seat];
-  if (exp && (exp.OPEN_GREEN?.size || exp.OPEN_AMBER?.size)) {
-    const map = new Map();
-    for (let i=0;i<RANKS_ASC.length;i++){
-      for (let j=0;j<RANKS_ASC.length;j++){
-        const r1=RANKS_ASC[i], r2=RANKS_ASC[j];
-        let code;
-        if (i===j) code=r1+r2;
-        else if (i<j) code=r1+r2+'s';
-        else code=r2+r1+'o';
-        let cls='fold';
-        if (exp.OPEN_GREEN?.has(code)) cls='open';
-        else if (exp.OPEN_AMBER?.has(code)) cls='mix';
-        map.set(code, cls);
+  // **** JSON preference for OPEN ****
+  function classMapOpen() {
+    try{
+      if (RANGES_JSON?.open?.[seat]){
+        return mapFromFreqBucket(RANGES_JSON.open[seat]);
       }
+    }catch(e){/* fallback */}
+    const exp = (typeof EXPLICIT_OPEN !== 'undefined') ? EXPLICIT_OPEN[seat] : undefined
+    if (exp && (exp.OPEN_GREEN?.size || exp.OPEN_AMBER?.size)) {
+      const map = new Map();
+      for (let i=0;i<RANKS_ASC.length;i++){
+        for (let j=0;j<RANKS_ASC.length;j++){
+          const r1=RANKS_ASC[i], r2=RANKS_ASC[j];
+          let code;
+          if (i===j) code=r1+r2;
+          else if (i<j) code=r1+r2+'s';
+          else code=r2+r1+'o';
+          let cls='fold';
+          if (exp.OPEN_GREEN?.has(code)) cls='open';
+          else if (exp.OPEN_AMBER?.has(code)) cls='mix';
+          map.set(code, cls);
+        }
+      }
+      return map;
     }
-    return map;
+    // Fallback: if a seat isn't defined explicitly, use hybrid tokens
+    return buildClassMapForPos(seat);
   }
-  // Fallback: if a seat isn't defined explicitly, use your hybrid tokens
-  return buildClassMapForPos(seat);
-}
 
+  // **** JSON preference for 3BET ****
   function classMap3bet(vsSeat) {
+    try{
+      const key = `${seat}_vs_${vsSeat}`;
+      if (RANGES_JSON?.three_bet?.[key]){
+        return mapFromFreqBucket(RANGES_JSON.three_bet[key]);
+      }
+    }catch(e){/* fallback */}
     const branch = HYBRID_3BET_RANGES[seat]?.[vsSeat] ?? null;
     return classMapFromLists(branch);
   }
+
+  // **** JSON preference for DEFEND (BB vs opener) ****
   function classMapDefend(vsSeat) {
-    // Defend currently only modeled for BB (as in your earlier spec)
     if (seat !== 'BB') return null;
+    try{
+      const key = `BB_vs_${vsSeat}`;
+      if (RANGES_JSON?.defend?.[key]){
+        return mapFromFreqBucket(RANGES_JSON.defend[key]);
+      }
+    }catch(e){/* fallback */}
     const branch = HYBRID_DEFEND_RANGES[vsSeat] ?? null;
     return classMapFromLists(branch);
   }
@@ -1420,12 +1226,10 @@ function openRangeModal(){
     tabs.forEach(t=>t.classList.toggle('active', t.getAttribute('data-mode')===mode));
     const enableVs = (mode !== 'open');
     vsSel.disabled = !enableVs;
-
     let clsMap = null;
     if (mode==='open') clsMap = classMapOpen();
     else if (mode==='3bet') clsMap = classMap3bet(vsSel.value);
     else clsMap = classMapDefend(vsSel.value);
-
     renderGridOrEmpty(clsMap);
   }
 
@@ -1437,9 +1241,7 @@ function openRangeModal(){
 
   rangeModalOverlay.classList.remove('hidden');
 }
-
 function closeRangeModal(){ if (rangeModalOverlay) rangeModalOverlay.classList.add('hidden'); }
-
 function showPosPopover(){
   if (!positionDisc || !posPopover) return;
   const pos = currentPosition();
@@ -1448,7 +1250,7 @@ function showPosPopover(){
   const x = rect.left + (rect.width/2) - 120;
   const y = rect.bottom + 8;
   posPopover.style.left = Math.max(8,x) + "px";
-  posPopover.style.top  = y + "px";
+  posPopover.style.top = y + "px";
   posPopover.classList.remove('hidden');
 }
 function hidePosPopover(){ if (posPopover) posPopover.classList.add('hidden'); }
@@ -1485,16 +1287,115 @@ function buildSizeAdvice(pos, size, min, max){
   return "Good. Linear opens in early/mid seats usually use ~2.0–2.5x.";
 }
 
+// ==================== Equity Cheatsheet ====================
+const equityModalOverlay = document.getElementById('equityModalOverlay');
+const equityModalClose = document.getElementById('equityModalClose');
+const equityModalBody = document.getElementById('equityModalBody');
+
+// Simplified cheatsheet rows (you can swap back to the larger set if you prefer)
+const EQUITY_CHEATSHEET = {
+  scope: "Heads‑up, flop, vs one random hand; directional guide",
+  rows: [
+    { cls: 'Nuts / Likely Nuts', eq: '75–95%', ex: 'Sets, strong two pair, nut draws' },
+    { cls: 'Strong Value',       eq: '60–75%', ex: 'Overpairs, top pair good kicker' },
+    { cls: 'Medium strength',    eq: '35–55%', ex: 'Weak top pair, second pair' },
+    { cls: 'Weak Showdown',      eq: '20–40%', ex: 'Ace high, underpairs' },
+    { cls: 'Draws (Combo / Strong / Weak)', eq: '25–55% (~50% / ~40% / ~25%)', ex: 'Flush draws, OESDs, gutshots, backdoors' }
+  ],
+  adjustments: [
+    { label: 'Opponent has Tight range?', delta: '−15%' },
+    { label: 'Opponent has Loose range?', delta: '+10%' },
+    { label: 'Domination risk?',          delta: '−20%' },
+    { label: 'You dominate them?',        delta: '+10%' }
+  ]
+};
+
+// Compact coach note from CBET frequency
+function oneLinerNoteForFreq(freq){
+  if (freq === 'High') return 'Bet small often';
+  if (freq === 'Med')  return 'Mix checks & small/medium bets';
+  if (freq === 'Low')  return 'Check more; size up when betting';
+  return 'Mix and react to runouts';
+}
+
+function openEquityEstimatesModal(){
+  if (!equityModalOverlay || !equityModalBody) return;
+
+  // One-liner Board Read
+  let moisture = '—', catLabel = 'Texture', freq = '';
+  try {
+    const tex = analyzeBoard(boardCards, holeCards) || {};
+    moisture = tex.moistureBucket || '—';
+  } catch(e){}
+  try {
+    const catKey = mapBoardToCategory(boardCards, holeCards);
+    const guide  = CBET_GUIDE[catKey];
+    if (guide){ catLabel = guide.label; freq = guide.freq; }
+  } catch(e){}
+  const oneLiner = `${catLabel} · ${moisture} — ${oneLinerNoteForFreq(freq)}`;
+
+  const rowsHtml = EQUITY_CHEATSHEET.rows.map(r => `
+    <tr>
+      <td><strong>${r.cls}</strong></td>
+      <td><span class="badge blue">${r.eq}</span></td>
+      <td class="muted">${r.ex}</td>
+    </tr>
+  `).join('');
+
+  const adjustmentsHtml = EQUITY_CHEATSHEET.adjustments.map(a => `
+    <li>
+      <span class="badge ${a.delta.trim().startsWith('+') ? 'green' : 'amber'}">${a.delta}</span>
+      ${a.label}
+    </li>
+  `).join('');
+
+  const headerHtml = `
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+      <span class="badge info">Board read</span>
+      <div style="font-weight:800">${oneLiner}</div>
+    </div>
+  `;
+
+  equityModalBody.innerHTML = `
+    ${headerHtml}
+
+    <div class="eq-table-wrap">
+      <table class="equity-table" role="table" aria-label="Equity estimate cheatsheet">
+        <thead>
+          <tr>
+            <th>Hand Class</th>
+            <th>Typical Equity</th>
+            <th>Example</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    </div>
+
+    <div class="eq-adjustments">
+      <h4>Equity Adjustments</h4>
+      <ul class="eq-adj-list">${adjustmentsHtml}</ul>
+      <div class="eq-footnote muted">
+        These are directional nudges; apply judgment based on position, ranges, and runouts.
+        Use alongside the simulator and 4&2 outs approximation.
+      </div>
+    </div>
+  `;
+
+  equityModalOverlay.classList.remove('hidden');
+}
+function closeEquityEstimatesModal(){ if (equityModalOverlay) equityModalOverlay.classList.add('hidden'); }
+
 // ==================== Phase 2: Board → category & C-bet guide ====================
 const POSTFLOP_SIZE_PRESETS = [25,33,50,66,75,100,150];
 const CBET_GUIDE = {
-  "A_HIGH_RAINBOW":  { label:"A‑High Rainbow",    freq:"High", sizes:[25,33],   note:"Range & nut advantage → small, frequent bets." },
-  "LOW_DISCONNECTED":{ label:"Low Disconnected",  freq:"High", sizes:[25,33],   note:"Deny equity to overcards; small bets perform well." },
-  "PAIRED_LOW":      { label:"Paired (Low)",      freq:"Med",  sizes:[33,66],   note:"Mix checks; when betting, lean small‑to‑medium." },
-  "BROADWAY_HEAVY":  { label:"Broadway‑Heavy",    freq:"Med",  sizes:[33,50],   note:"Ranges interact; favour small/medium in position." },
-  "TWO_TONE_DYNAMIC":{ label:"Two‑tone / Wet",    freq:"Low",  sizes:[66,100],  note:"Lower freq; size up to tax draws." },
-  "MONOTONE":        { label:"Monotone",          freq:"Low",  sizes:[66,100],  note:"Compressed equities; polar bigger bets or checks." },
-  "FOUR_TO_STRAIGHT":{ label:"4‑to‑Straight",     freq:"Low",  sizes:[100,150], note:"Threat advantage → large/overbets when betting." }
+  "A_HIGH_RAINBOW":    { label:"A‑High Rainbow",   freq:"High", sizes:[25,33],   note:"Range & nut advantage → small, frequent bets." },
+  "LOW_DISCONNECTED":  { label:"Low Disconnected", freq:"High", sizes:[25,33],   note:"Deny equity to overcards; small bets perform well." },
+  "PAIRED_LOW":        { label:"Paired (Low)",     freq:"Med",  sizes:[33,66],   note:"Mix checks; when betting, lean small‑to‑medium." },
+  "BROADWAY_HEAVY":    { label:"Broadway‑Heavy",   freq:"Med",  sizes:[33,50],   note:"Ranges interact; favour small/medium in position." },
+  "TWO_TONE_DYNAMIC":  { label:"Two‑tone / Wet",   freq:"Low",  sizes:[66,100],  note:"Lower freq; size up to tax draws." },
+  "MONOTONE":          { label:"Monotone",         freq:"Low",  sizes:[66,100],  note:"Compressed equities; polar bigger bets or checks." },
+  "FOUR_TO_STRAIGHT":  { label:"4‑to‑Straight",    freq:"Low",  sizes:[100,150], note:"Threat advantage → large/overbets when betting." }
 };
 function boardHasManyBroadways(board){
   const BW=new Set(["T","J","Q","K","A"]); let cnt=0; board.forEach(c=>{ if (BW.has(c.rank)) cnt++; }); return cnt>=2;
@@ -1515,7 +1416,7 @@ function boardPairedRankAtMost(board, maxRankChar){
 function mapBoardToCategory(board, hole){
   const tex = analyzeBoard(board, hole);
   if (tex.fourToStraight) return "FOUR_TO_STRAIGHT";
-  if (tex.mono)           return "MONOTONE";
+  if (tex.mono) return "MONOTONE";
   const suits = new Set(board.map(c=>c.suit));
   const twoTone = (board.length>=3 && suits.size===2 && !tex.mono);
   if (twoTone && (tex.connected || boardHasManyBroadways(board))) return "TWO_TONE_DYNAMIC";
@@ -1524,11 +1425,9 @@ function mapBoardToCategory(board, hole){
   if (boardHasManyBroadways(board)) return "BROADWAY_HEAVY";
   return "LOW_DISCONNECTED";
 }
-
 function openGuideModalFor(categoryKey){
   if (!guideModalOverlay || !guideModalBody) return;
   const g = CBET_GUIDE[categoryKey];
-
   if (!g) {
     guideModalBody.innerHTML = `
       <div style="color:#9aa3b2">No guide available for this texture (key: <code>${categoryKey || 'unknown'}</code>).</div>
@@ -1536,7 +1435,6 @@ function openGuideModalFor(categoryKey){
     guideModalOverlay.classList.remove('hidden');
     return;
   }
-
   // Header labels: 25% / 33% / ... (kept)
   const hdr = ['<div class="hdr"></div>']
     .concat(POSTFLOP_SIZE_PRESETS.map(s => `<div class="hdr">${s}%</div>`))
@@ -1549,7 +1447,6 @@ function openGuideModalFor(categoryKey){
     return near ? 'freq-med' : 'freq-low';
   };
 
-  // *** NEW: Put a visible dot + accessible label inside each cell ***
   const cells = POSTFLOP_SIZE_PRESETS.map(pct => {
     const klass = freqClass(pct);
     const aria = (klass === 'freq-high') ? 'High (recommended)' : (klass === 'freq-med' ? 'Medium (adjacent)' : 'Low');
@@ -1576,7 +1473,6 @@ function openGuideModalFor(categoryKey){
   `;
   guideModalOverlay.classList.remove('hidden');
 };
-  
 function closeGuideModal(){ if (guideModalOverlay) guideModalOverlay.classList.add('hidden'); }
 
 // ===== Decision label + size rows =====
@@ -1629,6 +1525,7 @@ function evalSizeAgainstGuide(chosenPct, guideSizes){
   if (chosenPct < Math.min(...guideSizes)) return { verdict:'Too small', detail:'Much smaller than the usual sizes for this texture.' };
   return { verdict:'Too large', detail:'Much larger than the usual sizes for this texture.' };
 }
+
 function evaluateFlopCbet(catKey, isHeroPFR, pos, action, sizePct){
   const g = CBET_GUIDE[catKey];
   if (!g) return { cbetEval:'n/a', sizeEval:'n/a', note:'No guide available for this texture.' };
@@ -1652,41 +1549,48 @@ function evaluateFlopCbet(catKey, isHeroPFR, pos, action, sizePct){
   if (sizeEval && sizeEval!=='n/a') note += ` Size: ${sizeEval}. ${sizeNote}`;
   return { cbetEval, sizeEval, note, recFreq:g.freq, recSizes:fmtSizeRangePct(g.sizes) };
 }
+
 function classifyTransition(prevBoard, newBoard, hole){
   const before=analyzeBoard(prevBoard,hole), after=analyzeBoard(newBoard,hole);
-  const gotMonotone = (!before.mono && after.mono);
+  const gotMonotone     = (!before.mono && after.mono);
   const nowFourToStraight = after.fourToStraight && !before.fourToStraight;
-  const pairedBefore=before.paired, pairedAfter=after.paired;
-  const boardPairedUp = (!pairedBefore && pairedAfter);
+  const pairedBefore    = before.paired, pairedAfter=after.paired;
+  const boardPairedUp   = (!pairedBefore && pairedAfter);
   const hiSet=new Set(["A","K","Q"]);
   const newCard=newBoard[newBoard.length-1];
-  const overcardCame = hiSet.has(newCard.rank);
+  const overcardCame    = hiSet.has(newCard.rank);
 
   let goodForPFR=false, badForPFR=false;
   if (overcardCame) goodForPFR=true;
   if (gotMonotone || nowFourToStraight || boardPairedUp) badForPFR=true;
+
   return { goodForPFR, badForPFR, gotMonotone, nowFourToStraight, boardPairedUp, overcardCame };
 }
+
 function evaluateBarrel(stage, prevBoard, currBoard, isHeroPFR, pos, prevAggressive, action, sizePct){
   if (!isHeroPFR) return { barrelEval:'Not PFR', sizeEval:'n/a', note:'You are not PFR — default is to be selective with stabs.' };
+
   const trans = classifyTransition(prevBoard, currBoard, holeCards);
   const ip = inPositionHeuristic(pos);
+
   let barrelEval='Mixed', logicNote=[];
   if (trans.goodForPFR && !trans.badForPFR){
     barrelEval = (action==='bet'||action==='raise') ? 'Good continue' : 'Okay to slow down';
     logicNote.push('Overcard favours aggressor; continuing is reasonable.');
   } else if (trans.badForPFR && !trans.goodForPFR){
     barrelEval = (action==='bet'||action==='raise') ? 'Risky barrel' : 'Prudent check more';
-    if (trans.gotMonotone) logicNote.push('Board turned monotone — equities compress; reduce barrel frequency.');
-    if (trans.nowFourToStraight) logicNote.push('Four‑to‑straight appears — ranges tighten; prefer polar bets if continuing.');
-    if (trans.boardPairedUp) logicNote.push('Board paired — boats/quads live; slow down frequency.');
+    if (trans.gotMonotone)        logicNote.push('Board turned monotone — equities compress; reduce barrel frequency.');
+    if (trans.nowFourToStraight)  logicNote.push('Four‑to‑straight appears — ranges tighten; prefer polar bets if continuing.');
+    if (trans.boardPairedUp)      logicNote.push('Board paired — boats/quads live; slow down frequency.');
   } else {
     barrelEval='Mixed (neutral card)'; logicNote.push('Neutral runout — mix checks and medium‑sized barrels.');
   }
+
   const cat = mapBoardToCategory(currBoard, holeCards);
   const g = CBET_GUIDE[cat];
   const sizeRes = evalSizeAgainstGuide(sizePct, g ? g.sizes : null);
   const sizeEval = sizeRes.verdict, sizeNote=sizeRes.detail;
+
   if (!ip && (action==='bet'||action==='raise') && g && g.freq==='Low'){
     logicNote.push('OOP on low‑freq textures → check more or size up when polarized.');
   }
@@ -1702,6 +1606,7 @@ function evaluateProbe(stage, catKey, pos, actionLabel, sizePct){
   const ip = inPositionHeuristic(pos);
   const g = CBET_GUIDE[catKey];
   if (!g) return { probeEval:'n/a', sizeEval:'n/a', note:'No guide for this texture.' };
+
   let desirability='Medium';
   if (catKey==='LOW_DISCONNECTED' || catKey==='PAIRED_LOW') desirability = ip ? 'High' : 'Medium';
   if (catKey==='A_HIGH_RAINBOW' || catKey==='BROADWAY_HEAVY') desirability = 'Low';
@@ -1725,13 +1630,14 @@ function evaluateProbe(stage, catKey, pos, actionLabel, sizePct){
   if (ip) note += ' In position you realize equity better; probing improves EV.';
   else note += ' Out of position, prefer checks unless board is especially favourable.';
   if (sizeEval && sizeEval!=='n/a') note += ` Size: ${sizeEval}. ${sizeNote}`;
-
   return { probeEval, sizeEval, note, recSizes: fmtSizeRangePct(recSizes) };
 }
+
 function classifyRiverLine(actionLabel, sizePct, hole, board){
   const made = describeMadeHand(hole, board);
   const cat = made.cat, label = made.label;
   let line='Check-back', expl='';
+
   if (actionLabel==='bet' || actionLabel==='raise'){
     if (cat>=2){ line='Value'; expl=`Strong made hand on river (${label}). Betting for value makes sense.`; }
     else if (cat===1){ if ((sizePct??0)<=50){ line='Thin Value'; expl=`One Pair with small/medium size — thin value line.`; }
@@ -1748,11 +1654,74 @@ function classifyRiverLine(actionLabel, sizePct, hole, board){
   } else if (actionLabel==='fold'){
     line='Check-fold'; expl=`You chose to fold — acceptable when price is poor or range is dominated.`;
   }
+
   let badge='gray';
   if (line==='Value' || line==='Value-catch' || line==='Thin Value') badge='green';
   if (line==='Bluff-catcher' || line.includes('Missed') || line==='Pot control') badge='amber';
   if (line==='Bluff' || line==='Give up' || line==='Check-fold' || line==='Polar (value/bluff)') badge='purple';
   return { riverLine: line, riverExplain: expl, madeLabel: label, badge };
+}
+
+// ==================== Equity Swing Alert — helpers ====================
+function equitySwingSeverity(deltaPct){
+  // deltaPct = newEquity - prevEquity
+  if (deltaPct <= -20) return 'red';   // big drop
+  if (deltaPct <= -10) return 'amber'; // moderate drop
+  if (deltaPct >=  10) return 'green'; // meaningful gain
+  return null; // no alert
+}
+// Transition-aware swing description
+function describeSwing(deltaPct, trans){
+  let base;
+  if (deltaPct <= -20) base = 'Big negative swing';
+  else if (deltaPct <= -10) base = 'Negative swing';
+  else if (deltaPct >=  10) base = 'Positive swing';
+  else base = '';
+
+  const reasons = [];
+  if (trans){
+    if (trans.gotMonotone)        reasons.push('board turned monotone');
+    if (trans.nowFourToStraight)  reasons.push('4‑to‑straight appeared');
+    if (trans.boardPairedUp)      reasons.push('board paired up');
+    if (trans.overcardCame)       reasons.push('overcard hit');
+  }
+  if (!base) return '';
+  if (reasons.length === 0){
+    return base + (deltaPct < 0
+      ? ' — reduce bluffing frequency / pot‑control more often.'
+      : ' — consider value / pressure if supported.');
+  }
+  const why = reasons.join(', ');
+  const steer = (deltaPct < 0)
+    ? 'reduce bluffing / control pot'
+    : 'consider value / pressure';
+  return `${base} — ${why}; ${steer}.`;
+}
+function updateKpiEquitySwing(deltaPct, severity, titleText){
+  const el = kpiEquitySwingEl;
+  if (!el) return;
+  el.classList.remove('swing-green','swing-amber','swing-red','swing-neutral');
+  if (!severity){
+    el.style.display = 'none';
+    el.removeAttribute('title');
+    return;
+  }
+  el.style.display = 'inline-block';
+  const cls = (severity==='green') ? 'swing-green' : (severity==='amber' ? 'swing-amber' : 'swing-red');
+  el.classList.add(cls);
+  el.textContent = `Equity swing ${deltaPct>0?'+':''}${deltaPct.toFixed(1)}%`;
+  if (titleText) el.title = titleText;
+}
+function insertInlineSwingBadge(deltaPct, severity, note){
+  if (!severity) return;
+  const col = (severity==='green') ? 'green' : (severity==='amber' ? 'amber' : 'red');
+  const html = `
+    <div style="margin-bottom:6px">
+      <span class="badge ${col}">EQUITY SWING ${deltaPct>0?'+':''}${deltaPct.toFixed(1)}%</span>
+      <span class="muted">${note}</span>
+    </div>
+  `;
+  if (feedbackEl) feedbackEl.insertAdjacentHTML('afterbegin', html);
 }
 
 // ==================== Hand flow ====================
@@ -1762,6 +1731,10 @@ function startNewHand(){
   hintsEl.textContent = "";
   inputForm.reset();
   handHistory = [];
+
+  // Clear KPI equity swing chip at the start of a new hand
+  updateKpiEquitySwing(0, null);
+
   submitStageBtn.classList.remove("hidden");
   nextStageBtn.classList.add("hidden");
   if (barSubmit) barSubmit.classList.remove("hidden");
@@ -1774,11 +1747,12 @@ function startNewHand(){
 
   // Rotate 6-max position
   heroPosIdx = (heroPosIdx + 1) % POSITIONS6.length;
+
   preflopAggressor = null;
   heroActions.preflop = { action:null, sizeBb:null };
-  heroActions.flop = { action:null, sizePct:null, cbet:null };
-  heroActions.turn = { action:null, sizePct:null, barrel:null };
-  heroActions.river= { action:null, sizePct:null, barrel:null };
+  heroActions.flop    = { action:null, sizePct:null, cbet:null };
+  heroActions.turn    = { action:null, sizePct:null, barrel:null };
+  heroActions.river   = { action:null, sizePct:null, barrel:null };
 
   // Pot & blinds noise
   const blinds=15;
@@ -1798,16 +1772,17 @@ function startNewHand(){
   renderCards();
   setPositionDisc();
   setPreflopBadge();
-
   updatePotInfo();
   updateHintsImmediate();
   maybeStartTimer();
 }
+
 function advanceStage(){
   currentStageIndex++;
   feedbackEl.innerHTML = "";
   inputForm.reset();
   hintsEl.textContent = "";
+
   submitStageBtn.classList.remove("hidden");
   nextStageBtn.classList.add("hidden");
   if (barSubmit) barSubmit.classList.remove("hidden");
@@ -1815,20 +1790,68 @@ function advanceStage(){
 
   if (currentStageIndex >= STAGES.length){ endHand(); return; }
   const stage = STAGES[currentStageIndex];
+
+  // --- Equity Swing: compute prev equity on previous board snapshot (include preflop) ---
+  const prevBoard = [...boardCards];
+  let prevEquity = null;
+  try {
+    prevEquity = computeEquityStats(holeCards, prevBoard).equity;
+  } catch(e){ /* ignore calc errors */ }
+
+  // Deal new street
   if (stage==="flop"){ boardCards.push(dealCard(), dealCard(), dealCard()); }
   else if (stage==="turn" || stage==="river"){ boardCards.push(dealCard()); }
 
+  // Scenario & pot update
   scenario = randomScenario();
   const { bet, newPot } = computeRoundedBetAndPot(pot, scenario.potFactor);
   toCall = bet; pot = newPot;
+
+  // --- Compute new equity and evaluate swing (with transition reasons) ---
+  let newEquity = null, delta = null;
+  try {
+    newEquity = computeEquityStats(holeCards, boardCards).equity;
+
+    if (prevEquity != null && newEquity != null) {
+      delta = newEquity - prevEquity; // positive = gain
+      // Use same thresholds for all streets (simple); you can make street-aware if desired
+      const sev = equitySwingSeverity(delta);
+
+      let trans = null;
+      try { trans = classifyTransition(prevBoard, boardCards, holeCards); } catch(e){}
+
+      const note = describeSwing(delta, trans);
+
+      // KPI chip (if present) + inline badge
+      updateKpiEquitySwing(delta, sev, note);
+      insertInlineSwingBadge(delta, sev, note);
+
+      // store in last history row for CSV/summary later
+      try {
+        const last = handHistory[handHistory.length-1] || {};
+        last.equitySwing = delta.toFixed(2);
+        last.equitySwingBand = sev ?? '';
+        last.equitySwingNote = note ?? '';
+      } catch(e){}
+    } else {
+      updateKpiEquitySwing(0, null); // hide if no signal
+    }
+  } catch(e){
+    updateKpiEquitySwing(0, null);
+  }
 
   renderCards();
   updatePotInfo();
   updateHintsImmediate();
   maybeStartTimer();
 }
+
 function endHand(){
   clearTimer();
+
+  // Clear KPI swing chip at hand end
+  updateKpiEquitySwing(0, null);
+
   showSummary();
   sessionHistory.push(...handHistory);
   saveSessionHistory();
@@ -1848,15 +1871,17 @@ inputForm.addEventListener("submit", (e)=>{
   const equityStats = computeEquityStats(holeCards, boardCards);
   const actualEquity = equityStats.equity;
   const actualPotOdds = computePotOdds(pot, toCall);
+
   const equityError = equityInput - actualEquity;
   const potOddsError = potOddsInput - actualPotOdds;
+
   const equityBand = bandForError(equityError);
   const potOddsBand = bandForError(potOddsError);
   const decisionBandResult = decisionBand(actualEquity, actualPotOdds, decision);
 
   updateHintsImmediate();
 
-  // Core feedback block (existing)
+  // Core feedback
   feedbackEl.innerHTML = `
     <div>
       <div><strong>Actual equity:</strong> ${actualEquity.toFixed(1)}%
@@ -1879,6 +1904,7 @@ inputForm.addEventListener("submit", (e)=>{
   `;
 
   const timeUsed = difficulty==="beginner" ? null : timerSeconds - (timeLeft ?? timerSeconds);
+
   handHistory.push({
     stage,
     equityInput,
@@ -1933,15 +1959,15 @@ inputForm.addEventListener("submit", (e)=>{
         ? `<div>Open size: ${heroActions.preflop.sizeBb.toFixed(1)}x — <span class="badge ${sizeEvalBadgeColor(sizeEval)}">${sizeEval||'n/a'}</span></div>
            <div style="opacity:.9">${sizeAdvice}</div>` : "";
 
-     feedbackEl.insertAdjacentHTML('beforeend', `
-  <div style="margin-top:8px">
-    <strong>Preflop (6‑max ${pos}):</strong>
-    <div>Range check: <span class="badge ${rangeClass==='Open'?'green':(rangeClass==='Mix'?'amber':'red')}">${rangeClass}</span></div>
-    <div>PFR: ${preflopAggressor ?? 'n/a'}</div>
-    ${sizeLine}
-    <div class="muted" style="opacity:.85;margin-top:4px">Opening size rule: ${openSizeRuleFor(pos)}</div>
-  </div>
-`);
+      feedbackEl.insertAdjacentHTML('beforeend', `
+        <div style="margin-top:8px">
+          <strong>Preflop (6‑max ${pos}):</strong>
+          <div>Range check: <span class="badge ${rangeClass==='Open'?'green':(rangeClass==='Mix'?'amber':'red')}">${rangeClass}</span></div>
+          <div>PFR: ${preflopAggressor ?? 'n/a'}</div>
+          ${sizeLine}
+          <div class="muted" style="opacity:.85;margin-top:4px">Opening size rule: ${openSizeRuleFor(pos)}</div>
+        </div>
+      `);
 
       const last = handHistory[handHistory.length-1];
       if (last){
@@ -1961,11 +1987,12 @@ inputForm.addEventListener("submit", (e)=>{
   try{
     const pos = POSITIONS6[heroPosIdx];
     const stageIsPost = (stage==='flop'||stage==='turn'||stage==='river');
+
     if (stageIsPost){
       const actionLabel = determinePostflopAction(decision, toCall);
       const betRaiseLabel = betOrRaiseLabelForStage();
-      heroActions[stage].action = actionLabel;
 
+      heroActions[stage].action = actionLabel;
       const catKey = mapBoardToCategory(boardCards, holeCards);
       let evalBlockHtml = '';
 
@@ -1982,6 +2009,7 @@ inputForm.addEventListener("submit", (e)=>{
             <div style="opacity:.9">${flopRes.note}</div>
           </div>
         `;
+
         const last = handHistory[handHistory.length-1];
         if (last){
           last.boardCards = boardToString(boardCards);
@@ -1995,7 +2023,7 @@ inputForm.addEventListener("submit", (e)=>{
         }
         heroActions.flop.cbet = (isHeroPFR && actionLabel==='bet');
 
-        // Phase 4: Non-PFR probe on flop
+        // Non-PFR probe on flop
         if (!isHeroPFR && isProbeSpot(actionLabel)){
           const probeRes = evaluateProbe('flop', catKey, pos, actionLabel, heroActions.flop.sizePct ?? null);
           evalBlockHtml += `
@@ -2008,6 +2036,7 @@ inputForm.addEventListener("submit", (e)=>{
           `;
           if (last){ last.postflopRole='Non-PFR'; last.probeEval = probeRes.probeEval ?? ''; }
         } else {
+          const last = handHistory[handHistory.length-1];
           if (last && !last.postflopRole) last.postflopRole = (preflopAggressor==='hero') ? 'PFR' : 'Caller';
         }
       }
@@ -2026,6 +2055,7 @@ inputForm.addEventListener("submit", (e)=>{
             <div style="opacity:.9">${turnRes.note}</div>
           </div>
         `;
+
         const last = handHistory[handHistory.length-1];
         if (last){
           last.boardCards = boardToString(boardCards);
@@ -2037,6 +2067,7 @@ inputForm.addEventListener("submit", (e)=>{
           last.barrelEval = turnRes.barrelEval ?? '';
           last.sizingEval = turnRes.sizeEval ?? '';
         }
+
         heroActions.turn.barrel = (actionLabel==='bet' || actionLabel==='raise');
 
         // Non-PFR probe on turn
@@ -2050,8 +2081,10 @@ inputForm.addEventListener("submit", (e)=>{
               <div style="opacity:.9">${probeRes.note}</div>
             </div>
           `;
+          const last = handHistory[handHistory.length-1];
           if (last){ last.postflopRole='Non-PFR'; last.probeEval = probeRes.probeEval ?? ''; }
         } else {
+          const last = handHistory[handHistory.length-1];
           if (last && !last.postflopRole) last.postflopRole = (preflopAggressor==='hero') ? 'PFR' : 'Caller';
         }
       }
@@ -2070,6 +2103,7 @@ inputForm.addEventListener("submit", (e)=>{
             <div style="opacity:.9">${riverRes.note}</div>
           </div>
         `;
+
         const last = handHistory[handHistory.length-1];
         if (last){
           last.boardCards = boardToString(boardCards);
@@ -2082,10 +2116,8 @@ inputForm.addEventListener("submit", (e)=>{
           last.sizingEval = riverRes.sizeEval ?? '';
         }
 
-        // Phase 4: River line classification
-        const actionLabelR = actionLabel;
-        const sizePctR = heroActions.river.sizePct ?? null;
-        const rc = classifyRiverLine(actionLabelR, sizePctR, holeCards, boardCards);
+        // River line classification
+        const rc = classifyRiverLine(actionLabel, heroActions.river.sizePct ?? null, holeCards, boardCards);
         evalBlockHtml += `
           <div style="margin-top:8px">
             <strong>River Line:</strong>
@@ -2098,7 +2130,7 @@ inputForm.addEventListener("submit", (e)=>{
 
       if (evalBlockHtml) feedbackEl.insertAdjacentHTML('beforeend', evalBlockHtml);
 
-      // Store sim context (optional)
+      // Store sim context
       const last = handHistory[handHistory.length-1];
       if (last){ last.numOpp = equityStats.numOpp; last.trials = equityStats.trials; }
     }
@@ -2109,12 +2141,11 @@ inputForm.addEventListener("submit", (e)=>{
   if (barSubmit) barSubmit.classList.add("hidden");
   if (barNext) barNext.classList.remove("hidden");
 });
-
 nextStageBtn.addEventListener("click", ()=> advanceStage());
 
 // Bottom bar mirroring
 if (barSubmit) barSubmit.addEventListener("click", ()=> { inputForm.requestSubmit(); });
-if (barNext)   barNext.addEventListener("click",  ()=> { advanceStage(); });
+if (barNext)   barNext.addEventListener("click", ()=> { advanceStage(); });
 
 // Number steppers
 document.querySelectorAll(".step-btn").forEach(btn=>{
@@ -2130,9 +2161,7 @@ document.querySelectorAll(".step-btn").forEach(btn=>{
 });
 
 // ==================== Summary & session ====================
-
 function categoryLabel(key){ return (CBET_GUIDE[key]?.label) || key || '—'; }
-
 function showSummary() {
   let html = "";
   let totalEquityErr = 0;
@@ -2146,7 +2175,6 @@ function showSummary() {
     totalPotErr += potErr;
     if (h.decisionBand === "green") decisionGreen++;
 
-    // Base lines (as before)
     let block = `
       <div class="summary-row">
         <strong>${h.stage.toUpperCase()}</strong><br/>
@@ -2155,7 +2183,6 @@ function showSummary() {
         Decision: ${h.decision.toUpperCase()} <span class="badge ${h.decisionBand}">${h.decisionBand}</span><br/>
     `;
 
-    // Enrich per street
     if (h.stage === "preflop") {
       if (h.heroPosition || h.preflopSizeEval || h.preflopRangeClass) {
         block += `
@@ -2167,7 +2194,6 @@ function showSummary() {
         `;
       }
     } else if (h.stage === "flop") {
-      // C-bet evaluation
       if (h.boardCards || h.boardCategory || h.cbetEval || h.sizingEval) {
         block += `
           <div style="margin-top:4px;opacity:.9">
@@ -2199,7 +2225,6 @@ function showSummary() {
       }
     }
 
-    // Common finishing hands (as before)
     if (h.handTypes && h.handTypes.length) {
       block += `<div style="opacity:.8"><em>Common finishing hands:</em> ${h.handTypes.map(x=>`${x.name} ${x.pct.toFixed(1)}%`).join(' · ')}</div>`;
     }
@@ -2247,7 +2272,6 @@ function clearSessionHistory(){
   try{ localStorage.removeItem(STORAGE_KEY); } catch(e){ console.warn("Could not clear history", e); }
   sessionHistory=[]; updateSessionStats(); summaryPanel.style.display="none"; feedbackEl.innerHTML=""; hintsEl.textContent="";
 }
-
 function downloadCsv(){
   if (sessionHistory.length===0) return;
   const headers = [
@@ -2256,12 +2280,19 @@ function downloadCsv(){
     "equityInput","equityActual","potOddsInput","potOddsActual",
     "decision","betOrRaiseLabel","sizePct",
     "equityBand","potOddsBand","decisionBand","timeUsed",
+
+    // Equity swing (new)
+    "equitySwing","equitySwingBand","equitySwingNote",
+
     // Phase 1
     "preflopRangeClass","preflopInRange","preflopAggressor","preflopAction","preflopSizeBb","preflopSizeEval",
+
     // Phase 3
     "cbetRecommendedFreq","sizingRecommendedRange","cbetEval","barrelEval","sizingEval",
+
     // Phase 4
     "postflopRole","probeEval","riverLineType","riverMadeHand",
+
     // Sim context
     "numOpp","trials"
   ];
@@ -2271,11 +2302,18 @@ function downloadCsv(){
       h.stage ?? "", h.heroPosition ?? "", h.dealtHand ?? "", h.boardCards ?? "", h.boardCategory ?? "",
       (h.equityInput ?? "").toString(), (h.equityActual ?? "").toString(), (h.potOddsInput ?? "").toString(), (h.potOddsActual ?? "").toString(),
       h.decision ?? "", h.betOrRaiseLabel ?? "", h.sizePct ?? "",
-      h.equityBand ?? "", h.potOddsBand ?? "", h.decisionBand ?? "", (h.timeUsed==null ? "" : h.timeUsed.toFixed(2)),
+      h.equityBand ?? "", h.potOddsBand ?? "", h.decisionBand ?? "", (h.timeUsed==null ? "" : h.timeUsed.toFixed ? h.timeUsed.toFixed(2) : h.timeUsed),
+
+      // new swing fields
+      h.equitySwing ?? "", h.equitySwingBand ?? "", (h.equitySwingNote ? `"${h.equitySwingNote.replace(/"/g,'""')}"` : ""),
+
       h.preflopRangeClass ?? "", (h.preflopInRange==null ? "" : (h.preflopInRange ? "true":"false")), h.preflopAggressor ?? "", h.preflopAction ?? "",
       (h.preflopSizeBb==null ? "" : (h.preflopSizeBb.toFixed ? h.preflopSizeBb.toFixed(1) : h.preflopSizeBb)), h.preflopSizeEval ?? "",
+
       h.cbetRecommendedFreq ?? "", h.sizingRecommendedRange ?? "", h.cbetEval ?? "", h.barrelEval ?? "", h.sizingEval ?? "",
+
       h.postflopRole ?? "", h.probeEval ?? "", h.riverLineType ?? "", h.riverMadeHand ?? "",
+
       h.numOpp ?? "", h.trials ?? ""
     ].join(","));
   });
@@ -2295,6 +2333,7 @@ function createSettingsPanel(){
   const panel = document.createElement("div");
   panel.id = "settingsPanel";
   panel.style.cssText = "position:fixed;right:20px;top:80px;z-index:9999;background:#1f2937;color:#ecf0f1;border:1px solid #374151;border-radius:8px;padding:12px;min-width:320px;display:none;box-shadow:0 8px 24px rgba(0,0,0,.35)";
+
   panel.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <div style="font-weight:600">Trainer Settings</div>
@@ -2320,13 +2359,13 @@ function createSettingsPanel(){
         <option ${SETTINGS.simQualityPreset==='Custom'?'selected':''}>Custom</option>
       </select>
       <label>Trials – Preflop</label>
-      <input type="number" id="set_trials_pre" min="500" step="500" value="${SETTINGS.trialsByStage.preflop}"/>
+      <input type="number" id="set_trials_pre"  min="500" step="500" value="${SETTINGS.trialsByStage.preflop}"/>
       <label>Trials – Flop</label>
       <input type="number" id="set_trials_flop" min="500" step="500" value="${SETTINGS.trialsByStage.flop}"/>
       <label>Trials – Turn</label>
       <input type="number" id="set_trials_turn" min="500" step="500" value="${SETTINGS.trialsByStage.turn}"/>
       <label>Trials – River</label>
-      <input type="number" id="set_trials_riv" min="500" step="500" value="${SETTINGS.trialsByStage.river}"/>
+      <input type="number" id="set_trials_riv"  min="500" step="500" value="${SETTINGS.trialsByStage.river}"/>
       <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
       <label>Add hero call to pot</label>
       <input type="checkbox" id="set_addCall" ${SETTINGS.pot.addHeroCallBetweenStreets ? 'checked' : ''}/>
@@ -2342,7 +2381,7 @@ function createSettingsPanel(){
   function applyQualityPreset(presetName){
     const preset = TRIALS_PRESETS[presetName]; if (!preset) return;
     SETTINGS.trialsByStage = { ...preset };
-    panel.querySelector("#set_trials_pre").value  = SETTINGS.trialsByStage.preflop;
+    panel.querySelector("#set_trials_pre").value = SETTINGS.trialsByStage.preflop;
     panel.querySelector("#set_trials_flop").value = SETTINGS.trialsByStage.flop;
     panel.querySelector("#set_trials_turn").value = SETTINGS.trialsByStage.turn;
     panel.querySelector("#set_trials_riv").value  = SETTINGS.trialsByStage.river;
@@ -2356,21 +2395,115 @@ function createSettingsPanel(){
     SETTINGS.sim.continueRate.turn  = Math.max(0, Math.min(1, (parseFloat(panel.querySelector("#set_rateTurn").value)||55)/100));
     SETTINGS.sim.continueRate.river = Math.max(0, Math.min(1, (parseFloat(panel.querySelector("#set_rateRiver").value)||45)/100));
     SETTINGS.sim.rangeAwareContinuation = !!panel.querySelector("#set_rangeAware").checked;
+
     const chosen = panel.querySelector("#set_quality").value;
     SETTINGS.simQualityPreset = chosen;
     if (chosen!=='Custom') applyQualityPreset(chosen);
     else {
-      SETTINGS.trialsByStage.preflop = Math.max(500, parseInt(panel.querySelector("#set_trials_pre").value,10) || 4000);
-      SETTINGS.trialsByStage.flop    = Math.max(500, parseInt(panel.querySelector("#set_trials_flop").value,10)|| 6000);
-      SETTINGS.trialsByStage.turn    = Math.max(500, parseInt(panel.querySelector("#set_trials_turn").value,10)|| 8000);
-      SETTINGS.trialsByStage.river   = Math.max(500, parseInt(panel.querySelector("#set_trials_riv").value,10) || 12000);
+      SETTINGS.trialsByStage.preflop = Math.max(500, parseInt(panel.querySelector("#set_trials_pre").value,10)  || 4000);
+      SETTINGS.trialsByStage.flop    = Math.max(500, parseInt(panel.querySelector("#set_trials_flop").value,10) || 6000);
+      SETTINGS.trialsByStage.turn    = Math.max(500, parseInt(panel.querySelector("#set_trials_turn").value,10) || 8000);
+      SETTINGS.trialsByStage.river   = Math.max(500, parseInt(panel.querySelector("#set_trials_riv").value,10)  || 12000);
     }
     SETTINGS.pot.addHeroCallBetweenStreets = !!panel.querySelector("#set_addCall").checked;
     SETTINGS.pot.endHandOnFold             = !!panel.querySelector("#set_endOnFold").checked;
+
     btn.textContent = "⚙︎ Settings ✓";
     setTimeout(()=>btn.textContent="⚙︎ Settings", 1200);
   });
 }
+
+// ==================== Custom Ranges Loader & Adapter ====================
+// Store & access user-imported 3-decimal frequencies; prefer these when present.
+const RANGES_STORAGE_KEY = "trainer_ranges_json_v1";
+let RANGES_JSON = null;
+
+function loadRangesFromStorage(){
+  try{
+    const raw = localStorage.getItem(RANGES_STORAGE_KEY);
+    if (!raw) return null;
+    RANGES_JSON = JSON.parse(raw);
+    return RANGES_JSON;
+  }catch(e){ console.warn("Could not parse stored ranges JSON", e); return null; }
+}
+function saveRangesToStorage(obj){
+  try{ localStorage.setItem(RANGES_STORAGE_KEY, JSON.stringify(obj)); }
+  catch(e){ console.warn("Could not save ranges JSON", e); }
+}
+window.loadRangesFromFile = async function(){
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'application/json';
+  input.onchange = async (e)=>{
+    const file = e.target.files?.[0]; if (!file) return;
+    try{
+      const text = await file.text();
+      const obj = JSON.parse(text);
+      if (!obj.open || !obj.three_bet){ alert("JSON missing 'open' or 'three_bet' blocks."); return; }
+      RANGES_JSON = obj; saveRangesToStorage(obj);
+      alert("Ranges imported. Heatmaps will use your JSON.");
+    }catch(err){ console.error("Import failed", err); alert("Import failed: invalid JSON"); }
+  };
+  input.click();
+};
+
+// Frequency → class thresholds (green/amber/red for the grid)
+function freqToClass(f){
+  const v = (typeof f === 'string') ? parseFloat(f) : (f ?? 0);
+  if (v >= 0.670) return 'open';
+  if (v >= 0.150) return 'mix';
+  return 'fold';
+}
+function mapFromFreqBucket(bucketObj){
+  const m = new Map();
+  if (bucketObj){
+    for (const [code, freq] of Object.entries(bucketObj)) m.set(code, freqToClass(freq));
+  }
+  return m;
+}
+
+// ===== Hosted Ranges Autoload =====
+// Put your hosted JSON here (same-origin path or full URL)
+const RANGES_URL = '/assets/ranges_6max.json';
+
+// Fetch with cache & graceful fallback to localStorage and built-ins
+async function fetchRangesFromUrlOnce(){
+  try{
+    const res = await fetch(RANGES_URL, { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const obj = await res.json();
+    if (!obj.open || !obj.three_bet) throw new Error('Invalid schema: missing open/three_bet');
+    RANGES_JSON = obj;                  // in-memory
+    saveRangesToStorage(RANGES_JSON);   // persist for next loads
+    console.log('[ranges] Loaded from URL, cached to localStorage');
+    return true;
+  }catch(err){
+    console.warn('[ranges] URL fetch failed, will use localStorage or built-ins', err);
+    return false;
+  }
+}
+
+// Try URL → then localStorage (already loaded in init) → built-ins
+async function ensureRangesLoaded(){
+  // If already loaded (from localStorage in init), do nothing
+  if (RANGES_JSON && RANGES_JSON.open && RANGES_JSON.three_bet) return;
+
+  // Try URL autoload
+  const ok = await fetchRangesFromUrlOnce();
+  if (ok) return;
+
+  // If URL failed but storage had something, keep it; else remain on built-ins
+  if (!RANGES_JSON){
+    const fromStore = loadRangesFromStorage();
+    if (fromStore && fromStore.open && fromStore.three_bet){
+      console.log('[ranges] Using previously stored ranges');
+      return;
+    }
+    console.log('[ranges] No hosted ranges and no stored ranges; using built-ins');
+  }
+}
+
+
 
 // ==================== UI wiring (Phase 1 & 2) ====================
 function setupPhase1UI(){
@@ -2396,6 +2529,7 @@ function setupPhase1UI(){
       heroActions.preflop.sizeBb = isFinite(val) ? val : null;
     });
   }
+
   ["decFold","decCall","decRaise"].forEach(id=>{
     const el=document.getElementById(id); if (!el) return;
     el.addEventListener('change', ()=>{
@@ -2406,7 +2540,20 @@ function setupPhase1UI(){
     });
   });
 }
+
 function setupPhase2UI(){
+  // --- Open Equity Cheatsheet by clicking on the board cards (always on)
+  if (boardCardsEl){
+    boardCardsEl.style.cursor = "pointer";
+    boardCardsEl.title = "Tap to view equity estimate cheatsheet";
+    boardCardsEl.addEventListener('click', () => openEquityEstimatesModal());
+  }
+  // Equity modal close handlers
+  if (equityModalClose) equityModalClose.addEventListener('click', () => closeEquityEstimatesModal());
+  if (equityModalOverlay) equityModalOverlay.addEventListener('click', (e) => {
+    if (e.target === equityModalOverlay) closeEquityEstimatesModal();
+  });
+
   if (sizePresetRowPost){
     sizePresetRowPost.addEventListener('click', (e)=>{
       const btn=e.target.closest('.size-pct'); if (!btn) return;
@@ -2419,18 +2566,23 @@ function setupPhase2UI(){
       }
     });
   }
+
   ["decFold","decCall","decRaise"].forEach(id=>{
     const el=document.getElementById(id); if (!el) return;
     el.addEventListener('change', updateDecisionLabels);
   });
   if (guideModalClose) guideModalClose.addEventListener('click', ()=> closeGuideModal());
   if (guideModalOverlay) guideModalOverlay.addEventListener('click', (e)=>{ if (e.target===guideModalOverlay) closeGuideModal(); });
-
   document.addEventListener('click', (e)=>{
     const el = e.target.closest('#boardBadgeBar'); if (!el) return;
     const catKey = mapBoardToCategory(boardCards, holeCards);
     openGuideModalFor(catKey);
   });
+
+  // Make KPI swing chip open the cheatsheet if present
+  if (kpiEquitySwingEl){
+    kpiEquitySwingEl.addEventListener('click', ()=> openEquityEstimatesModal());
+  }
 }
 
 // ==================== Event wiring ====================
@@ -2450,11 +2602,11 @@ difficultySelect.addEventListener("change", ()=>{
   updatePotInfo();
   updateHintsImmediate();
 });
-timerRange.addEventListener("input", ()=> { timerSeconds = parseInt(timerRange.value, 10) || 10; timerValueEl.textContent = timerSeconds; });
-newHandBtn.addEventListener("click", ()=> { startNewHand(); });
-downloadCsvBtn.addEventListener("click", ()=> { downloadCsv(); });
-closeSummaryBtn.addEventListener("click", ()=> { summaryPanel.style.display = "none"; });
-resetStatsBtn.addEventListener("click", ()=> { clearSessionHistory(); });
+timerRange.addEventListener("input", () => { timerSeconds = parseInt(timerRange.value, 10) || 10; timerValueEl.textContent = timerSeconds; });
+newHandBtn.addEventListener("click", () => { startNewHand(); });
+downloadCsvBtn.addEventListener("click", () => { downloadCsv(); });
+closeSummaryBtn.addEventListener("click", () => { summaryPanel.style.display = "none"; });
+resetStatsBtn.addEventListener("click", () => { clearSessionHistory(); });
 
 // ==================== Init ====================
 (function init(){
@@ -2465,7 +2617,20 @@ resetStatsBtn.addEventListener("click", ()=> { clearSessionHistory(); });
   difficulty = difficultySelect.value;
   timerRange.disabled = true;
   if (timerCountdownEl) timerCountdownEl.textContent = "No timer in Beginner Mode";
+
+  // Settings, UI wiring
   createSettingsPanel();
   setupPhase1UI();
   setupPhase2UI();
+
+  // Load any stored JSON ranges (if imported earlier)
+  loadRangesFromStorage();
+
+
+// NEW: Try to load hosted ranges for all users (falls back to storage/built-ins)
+  ensureRangesLoaded();
+
+
+  // Hide swing chip at boot
+  updateKpiEquitySwing(0, null);
 })();
