@@ -347,6 +347,58 @@ body.compact-auto .primary{ padding:9px 14px; }
   background:#0b1222; color:#e6eefc; border:1px solid #20304a; border-radius:10px; padding:7px 10px; font-weight:800;
 }
 
+/* ===== Equity Cheatsheet ===== */
+.muted{ color: var(--muted); }
+
+.eq-table-wrap{
+  border:1px solid var(--border);
+  border-radius:12px;
+  overflow:auto;
+}
+
+.equity-table{
+  width:100%;
+  border-collapse:collapse;
+  font-size:.92rem;
+}
+
+.equity-table thead th{
+  position:sticky; top:0;
+  background:#0b1324; color:#e6eefc;
+  text-align:left; padding:10px;
+  border-bottom:1px solid var(--border);
+  letter-spacing:.2px; font-weight:900;
+}
+
+.equity-table td{
+  padding:10px;
+  border-bottom:1px solid var(--border);
+  vertical-align:top;
+}
+
+.equity-table tr:hover td{ background:#0b1222; }
+
+.eq-adjustments{ margin-top:10px; }
+
+.eq-adjustments h4{
+  margin:10px 0 6px;
+  font-size:1rem; letter-spacing:.2px;
+}
+
+.eq-adj-list{
+  margin:0; padding-left:18px;
+  display:flex; flex-direction:column; gap:6px;
+}
+
+.eq-footnote{ margin-top:8px; font-size:.85rem; }
+
+/* ===== Equity Swing chip colours ===== */
+.chip.swing-green   { background: #05331f; color:#bbf7d0; border:1px solid #22c55e; }
+.chip.swing-amber   { background: #3b2a00; color:#fde68a; border:1px solid #f59e0b; }
+.chip.swing-red     { background: #3f0c0c; color:#fecaca; border:1px solid #ef4444; }
+.chip.swing-neutral { background: var(--chip-bg); color: var(--chip-text); border:1px solid #1e2a44; }
+
+
 /* =========================================================
    Stability override (kept small) — ensures preflop heatmap
    colours win even if another stylesheet sets .cell bkg.
@@ -357,3 +409,4 @@ body.compact-auto .primary{ padding:9px 14px; }
 .range-grid .cell.cell-mix { background: rgba(245,158,11,.16) !important; border-color:#f59e0b !important; color:#fde68a !important; }
 .range-grid .cell.cell-fold{ background: #0b1222 !important;              border-color:#20304a !important; color:#9aa3b2 !important; }
 .range-grid .cell.cell-hero{ box-shadow: 0 0 0 2px var(--accent-2) inset, 0 0 0 2px var(--accent-2) !important; }
+
