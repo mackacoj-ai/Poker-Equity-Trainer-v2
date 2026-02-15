@@ -44,6 +44,7 @@
       <span class="chip" id="kpiPot">Pot: £0</span>
       <span class="chip" id="kpiToCall">To Call: £0</span>
       <span class="chip secondary" id="kpiTimer">Time: —</span>
+      <span class="chip" id="kpiEquitySwing" style="display:none">Equity swing —</span>
     </div>
 
     <main class="table">
@@ -210,6 +211,19 @@
       </div>
     </div>
   </div>
+
+<!-- Equity Estimate Cheatsheet (opens on board click) -->
+<div id="equityModalOverlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="equityModalTitle">
+  <div id="equityModal" class="modal-card">
+    <div class="modal-header">
+      <h3 id="equityModalTitle">Equity Estimate Cheatsheet</h3>
+      <button id="equityModalClose" class="btn btn-ghost" aria-label="Close">✕</button>
+    </div>
+    <div id="equityModalBody" class="modal-body">
+      <!-- Table & adjustments injected by Script.js -->
+    </div>
+  </div>
+</div>
 
   <!-- Tiny popover for position one-liner -->
   <div id="posPopover" class="pos-popover hidden" role="tooltip" aria-live="polite"></div>
