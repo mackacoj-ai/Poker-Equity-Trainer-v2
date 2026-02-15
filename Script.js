@@ -2464,7 +2464,7 @@ function mapFromFreqBucket(bucketObj){
 
 // ===== Hosted Ranges Autoload =====
 // Put your hosted JSON here (same-origin path or full URL)
-const RANGES_URL = '/assets/ranges_6max.json';
+const RANGES_URL = 'assets/ranges_6max.json';
 
 // Fetch with cache & graceful fallback to localStorage and built-ins
 async function fetchRangesFromUrlOnce(){
