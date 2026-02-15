@@ -14,6 +14,14 @@ let difficulty = "beginner";
 let handHistory = [];
 let sessionHistory = [];
 
+// ====== Blinds & schedule (tournament-friendly) ======
+let BLINDS = { sb: 5, bb: 10 };   // always rounded via toStep5 on use
+const BLIND_SCHEDULE = [
+  [5,10],[10,20],[15,30],[20,40],[25,50],[30,60],[40,80],
+  [50,100],[75,150],[100,200],[150,300],[200,400]
+];
+let blindScheduleIdx = 0;
+
 // ==================== DOM (existing) ====================
 const holeCardsEl = document.getElementById("holeCards");
 const boardCardsEl = document.getElementById("boardCards");
@@ -37,6 +45,9 @@ const sessionStatsEl = document.getElementById("sessionStats");
 const submitStageBtn = document.getElementById("submitStageBtn");
 const nextStageBtn = document.getElementById("nextStageBtn");
 const resetStatsBtn = document.getElementById("resetStatsBtn");
+const kpiBlindsEl = document.getElementById("kpiBlinds");
+const blindsLabelEl = document.getElementById("blindsLabel");
+``
 
 // Mobile KPI bar
 const kpiStageEl = document.getElementById("kpiStage");
@@ -119,6 +130,10 @@ function updatePotInfo(){
   if (kpiCallEl) kpiCallEl.textContent = `To Call: £${toCall.toFixed(0)}`;
   const tl = (timeLeft==null) ? "—" : `${Math.max(0,timeLeft)}s`;
   if (kpiTimerEl) kpiTimerEl.textContent = `Time: ${tl}`;
+  if (kpiBlindsEl) kpiBlindsEl.textContent =
+  `Blinds: £${toStep5(BLINDS.sb)} / £${toStep5(BLINDS.bb)}`;
+  if (blindsLabelEl) blindsLabelEl.textContent =
+  `£${toStep5(BLINDS.sb)} / £${toStep5(BLINDS.bb)}`;
   const pOdds = computePotOdds(pot, toCall);
   if (barPotOdds) barPotOdds.textContent = isFinite(pOdds) ? `Pot odds ${pOdds.toFixed(1)}%` : 'Pot odds —';
   // Keep Bet/Raise label + size rows in sync
@@ -431,6 +446,17 @@ function detectStraightDrawFromAllCards(allCards){
 }
 
 // ==================== Outs & Hints ====================
+
+// ---- Simple tentative-outs weight by board moisture ----
+// Uses the moisture bucket you already compute in analyzeBoard(...):
+//   Dry / Semi‑dry  → tentative weight = 0.50
+//   Semi‑wet / Wet  → tentative weight = 0.33
+function simpleTentativeWeight(texture) {
+  const bucket = texture.moistureBucket || "Dry";
+  if (bucket === "Wet" || bucket === "Semi‑wet") return 0.33;
+  return 0.50;
+}
+
 function estimateOuts(hole, board){
   const stage = STAGES[currentStageIndex];
   const texture = analyzeBoard(board, hole);
@@ -505,7 +531,20 @@ function estimateOuts(hole, board){
       }
     }
   }
-  return { strong, tentative, outsDetail, texture };
+// ===== Effective outs using simple weights =====
+        const wTent = simpleTentativeWeight(texture);
+       const strongOuts = strong;
+      const tentativeOuts = tentative;
+      const effectiveOuts = strongOuts + (wTent * tentativeOuts);
+
+  return {
+    strong: strongOuts,
+    tentative: tentativeOuts,
+    effectiveOuts,
+    tentativeWeight: wTent,
+    outsDetail,
+    texture
+  };
 }
 
 function updateHintsImmediate(){
@@ -524,18 +563,29 @@ function updateHintsImmediate(){
     nutsBadge = prob.likely ? `<span class="badge green">Likely Nuts</span>` : `<span class="badge amber">Beatable</span>`;
   }
 
-  const totalOuts = outsInfo.strong + outsInfo.tentative;
-  let approxEquity=null;
-  if (stage==="flop") approxEquity = totalOuts*4;
-  if (stage==="turn") approxEquity = totalOuts*2;
+ const effectiveOuts = outsInfo.effectiveOuts ?? (outsInfo.strong + outsInfo.tentative);
+let approxEquity = null;
+if (stage === "flop") approxEquity = effectiveOuts * 4;
+if (stage === "turn") approxEquity = effectiveOuts * 2;
 
-  const outsLines = [];
-  outsLines.push(`<div><strong>Strong outs:</strong> ${outsInfo.strong}</div>`);
-  outsLines.push(`<div><strong>Tentative outs:</strong> ${outsInfo.tentative}</div>`);
-  if (totalOuts>0 && approxEquity!==null){
-    outsLines.push(`<div>4 & 2 rule → approx <strong>${approxEquity.toFixed(1)}%</strong></div>`);
-  }
-  if (outsInfo.outsDetail.length>0){ outsLines.push(`<div style="opacity:.9">${outsInfo.outsDetail.join(" ")}</div>`); }
+ const outsLines = [];
+outsLines.push(`<div><strong>Strong outs:</strong> ${outsInfo.strong}</div>`);
+outsLines.push(
+  `<div><strong>Tentative outs:</strong> ${outsInfo.tentative}` +
+  (outsInfo.tentative > 0 ? ` (×${(outsInfo.tentativeWeight ?? 0.5).toFixed(2)})` : ``) +
+  `</div>`
+);
+outsLines.push(
+  `<div><strong>Effective outs:</strong> ${(effectiveOuts ?? 0).toFixed(2)}</div>`
+);
+
+if (approxEquity !== null && (effectiveOuts ?? 0) > 0){
+  outsLines.push(`<div>4 & 2 rule (discounted) → approx <strong>${approxEquity.toFixed(1)}%</strong></div>`);
+}
+
+if (outsInfo.outsDetail.length > 0){
+  outsLines.push(`<div style="opacity:.9">${outsInfo.outsDetail.join(" ")}</div>`);
+} 
 
   const examplePotOdds = computePotOdds(pot, toCall);
   const potLine = (stage!=="river")
@@ -544,10 +594,10 @@ function updateHintsImmediate(){
 
   const boardLine = `<span id="boardBadgeBar" class="board-badges" title="Tap for c-bet guide">${boardTags || '<span class="badge green">Stable</span>'}</span>`;
   const summaryHtml = `
-    <div><strong>Board:</strong> ${boardLine}</div>
-    <div><strong>Made:</strong> ${made.label} ${nutsBadge}</div>
-    <div><strong>Outs:</strong> ${outsInfo.strong} strong${outsInfo.tentative?`, ${outsInfo.tentative} tentative`:''}${(approxEquity!=null && totalOuts>0)?` · ~${approxEquity.toFixed(1)}%`:""}</div>
-  `;
+           <div><strong>Board:</strong> ${boardLine}</div>
+           <div><strong>Made:</strong> ${made.label} ${nutsBadge}</div>
+          <div><strong>Outs:</strong> ${outsInfo.strong} strong${outsInfo.tentative?`, ${outsInfo.tentative} tentative`:''}${(approxEquity!=null && (effectiveOuts ?? 0) > 0)?` · ~        ${approxEquity.toFixed(1)}%`:""}</div>
+`;
   const detailsHtml = `
     <div style="display:flex;flex-direction:column;gap:6px">
       ${outsLines.join("")}
@@ -842,18 +892,28 @@ const HYBRID_RANGES = {
   SB:  { open:["22+","A2s+","K9s+","Q9s+","J9s+","T9s-65s","A2o+","KTo+","QTo+","JTo"], mix:[] }
 };
 
-// ===== EXPLICIT OPEN RANGES (omitted here for brevity – keep your existing block) =====
-// ... (keep your EXPLICIT_OPEN block exactly as you have it) ...
+function hasNonEmptySeatBucket(obj, seat) {
+  const b = obj?.[seat];
+  return b && typeof b === 'object' && Object.keys(b).length > 0;
+}
 
-// Use explicit open sets first; if a seat isn't explicitly defined, fall back to hybrid tokens.
+// ===== EXPLICIT OPEN RANGES =====
+
+
 // **** MODIFIED to prefer JSON frequencies when loaded ****
+
+function hasNonEmptySeatBucket(obj, seat) {
+  const b = obj?.[seat];
+  return b && typeof b === 'object' && Object.keys(b).length > 0;
+}
+
 function getClassMapForSeat(seat){
-  // 1) Prefer imported JSON if present
-  try{
-    if (RANGES_JSON?.open?.[seat]){
-      return mapFromFreqBucket(RANGES_JSON.open[seat]); // defined later in loader section
-    }
-  }catch(e){/* fallback */ }
+ // 1) Prefer imported JSON only if the seat bucket is non-empty
+try{
+  if (hasNonEmptySeatBucket(RANGES_JSON?.open, seat)){
+    return mapFromFreqBucket(RANGES_JSON.open[seat]);
+  }
+}catch(e){/* fallback */ }
 
   // 2) Your explicit-first logic
   const exp = (typeof EXPLICIT_OPEN !== 'undefined') ? EXPLICIT_OPEN[seat] : undefined;
@@ -878,8 +938,266 @@ function getClassMapForSeat(seat){
   return buildClassMapForPos(seat);
 }
 
+
+// ... (keep your EXPLICIT_OPEN block exactly as you have it) ...
+// Use explicit open sets first; if a seat isn't explicitly defined, fall back to hybrid tokens.
+
 // ---------- Helpers for explicit block (keep your existing helper functions) ----------
 // ... (keep addPairs/addAllSuitedBroadways/... etc) ...
+
+/* ============================================================
+   EXPLICIT OPEN RANGES (RFI • 6-max • ~100bb) — GREEN / AMBER
+   - GREEN = pure/mostly-pure opens
+   - AMBER = mixed / low-frequency opens (kept from earlier suggestion)
+   - Built with deterministic helpers (no regex/token parsing).
+   Paste this right under your // Hybrid ranges (Open) section.
+   ============================================================ */
+
+// ---------- Helpers (deterministic) ----------
+const BW = ["A","K","Q","J","T"]; // broadway ranks
+function rIdx(r){ return RANKS_ASC.indexOf(r); } // smaller index = stronger (A=0 ... 2=12)
+
+// Add AA..minPair (e.g., minPair='2' or '22' -> down to 22)
+function addPairs(set, minPair="22"){
+  const min = (minPair.length===2 ? minPair[0] : minPair);
+  const stop = rIdx(min);
+  for (let i=0; i<=stop; i++) {
+    const rr = RANKS_ASC[i];
+    set.add(rr+rr);
+  }
+}
+
+// Add all suited broadways (AKs, AQs, ..., KQs, KJs, ..., QJs, QTs, JTs)
+function addAllSuitedBroadways(set){
+  for (let i=0;i<BW.length;i++){
+    for (let j=i+1;j<BW.length;j++){
+      set.add(BW[i] + BW[j] + 's');
+    }
+  }
+}
+// Add all offsuit broadways (AKo, AQo, ..., JTo)
+function addAllOffsuitBroadways(set){
+  for (let i=0;i<BW.length;i++){
+    for (let j=i+1;j<BW.length;j++){
+      set.add(BW[i] + BW[j] + 'o');
+    }
+  }
+}
+// Add specific offsuit broadway minima, e.g., KTo+, QTo+, JTo (used for SB/BB text)
+function addMostOffsuitBroadways_KTo_QTo_JTo(set){
+  set.add("KTo"); set.add("KJo"); set.add("KQo");
+  set.add("QTo"); set.add("QJo");
+  set.add("JTo");
+}
+// Add offsuit ATo+ (ATo, AJo, AQo, AKo)
+function addAToPlus(set){
+  set.add("ATo"); set.add("AJo"); set.add("AQo"); set.add("AKo");
+}
+// Add offsuit A2o+ up to AKo
+function addA2oPlus(set){
+  for (let i=rIdx("K"); i<=rIdx("2"); i++){ // K..2 (descending indices)
+    const lo = RANKS_ASC[i];
+    set.add("A" + lo + "o");
+    if (lo==="K") break; // stops at AKo
+  }
+}
+// Add offsuit A8o+ (A8o..AKo)
+function addA8oPlus(set){
+  for (let i=rIdx("K"); i<=rIdx("8"); i++){
+    const lo = RANKS_ASC[i];
+    set.add("A" + lo + "o");
+    if (lo==="K") break;
+  }
+}
+// Add suited A2s..A5s
+function addA2s_to_A5s(set){
+  ["5","4","3","2"].forEach(lo => set.add("A"+lo+"s"));
+}
+// Add all suited Axs (A2s..AKs)
+function addAllAxs(set){
+  for (let i=rIdx("K"); i<=rIdx("2"); i++){
+    const lo = RANKS_ASC[i];
+    set.add("A" + lo + "s");
+    if (lo==="K") break; // done at AKs
+  }
+}
+
+// Suited connectors inclusive range, e.g., T9s–54s; or down to 32s
+function addSuitedConnectorsRange(set, start="T9", end="54"){
+  const sHi = start[0], sLo = start[1];
+  const eHi = end[0],   eLo = end[1];
+  // Validate adjacency (connector = next rank down)
+  let iStart = rIdx(sHi), iEnd = rIdx(eHi);
+  for (let i=iStart; i<=rIdx("3"); i++){ // walk down until 32
+    const hi = RANKS_ASC[i], lo = RANKS_ASC[i+1];
+    if (!lo) break;
+    set.add(hi + lo + 's');
+    if (hi===eHi && lo===eLo) break;
+  }
+}
+// Suited gappers inclusive range, e.g., 97s–64s (one-gap)
+function addSuitedGappersRange(set, startHi="9", endHi="6"){
+  let iStart = rIdx(startHi), iEnd = rIdx(endHi);
+  for (let i=iStart; i<=iEnd; i++){
+    const hi = RANKS_ASC[i], mid = RANKS_ASC[i+1], lo = RANKS_ASC[i+2];
+    if (!lo) break;
+    set.add(hi + lo + 's'); // e.g., 9 & 7 => "97s"
+  }
+}
+// Suited connectors down to a low pair like "32s" (T9s..32s)
+function addSuitedConnectorsDownTo(set, end="32"){
+  const eHi = end[0], eLo = end[1];
+  for (let i=rIdx("T"); i<=rIdx("3"); i++){
+    const hi = RANKS_ASC[i], lo = RANKS_ASC[i+1];
+    if (!lo) break;
+    set.add(hi + lo + 's');
+    if (hi===eHi && lo===eLo) break;
+  }
+}
+// Convenience: add explicit offsuit connectors list
+function addOffsuitConnectorsList(set, codes=["T9o","98o","87o"]){
+  codes.forEach(c => set.add(c));
+}
+
+// ---------- Build explicit GREEN/AMBER per seat from your spec ----------
+// We keep the AMBER suggestions we used earlier, then remove any overlap with GREEN.
+const EXPLICIT_OPEN = {
+  UTG: {
+    OPEN_GREEN: (()=>{ // ~14–16%
+      const g = new Set();
+      addPairs(g, "22");                         // 22+
+      // Broadways (offsuit): AJo+, KQo
+      g.add("AJo"); g.add("AQo"); g.add("AKo"); g.add("KQo");
+      // Suited broadways: ATs+, KTs+, QTs+, JTs
+      ["T","J","Q","K"].forEach(lo => g.add("A"+lo+"s")); // ATs..AKs
+      g.add("KTs"); g.add("KJs"); g.add("KQs");
+      g.add("QTs"); g.add("QJs");
+      g.add("JTs");
+      // Suited Aces: A2s–A5s
+      addA2s_to_A5s(g);
+      // Suited connectors: 98s, 87s, 76s
+      ["98s","87s","76s"].forEach(c=>g.add(c));
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["A5s","A4s","KJs","QJs","KQo"]) // earlier amber (dup will be removed below)
+  },
+
+  HJ: {
+    OPEN_GREEN: (()=>{ // ~18–20%
+      const g = new Set();
+      addPairs(g, "22");
+      // Broadways
+      addAToPlus(g);                 // ATo+
+      g.add("KJo"); g.add("KQo");    // KJo+
+      g.add("QJo");                  // QJo
+      ["T","J","Q","K"].forEach(lo => g.add("A"+lo+"s")); // ATs+
+      g.add("KTs"); g.add("KJs"); g.add("KQs");
+      g.add("QTs"); g.add("QJs");
+      g.add("JTs");
+      // Suited Aces: A2s–A5s
+      addA2s_to_A5s(g);
+      // Suited connectors: T9s–65s
+      addSuitedConnectorsRange(g, "T9", "65");
+      // Suited gappers: 97s, 86s
+      ["97s","86s"].forEach(c=>g.add(c));
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["A4s","A3s","A2s","KTs","QTs","JTs","97s","87s","76s","AJo"])
+  },
+
+  CO: {
+    OPEN_GREEN: (()=>{ // ~26–28%
+      const g = new Set();
+      addPairs(g, "22");
+      // Broadways: ATo+, KTo+, QTo+, JTo; all suited broadways
+      addAToPlus(g);
+      g.add("KTo"); g.add("KJo"); g.add("KQo");
+      g.add("QTo"); g.add("QJo");
+      g.add("JTo");
+      addAllSuitedBroadways(g);
+      // Suited Aces: A2s–A5s
+      addA2s_to_A5s(g);
+      // Suited connectors: T9s–54s
+      addSuitedConnectorsRange(g, "T9", "54");
+      // Suited gappers: 97s–64s
+      addSuitedGappersRange(g, "9", "6");
+      // Offsuit Aces: A8o+
+      addA8oPlus(g);
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["AJo","ATo","KTo","QTo","J9s","T8s","97s","54s"])
+  },
+
+  BTN: {
+    OPEN_GREEN: (()=>{ // ~45–50%
+      const g = new Set();
+      addPairs(g, "22");
+      // Broadways: ALL offsuit & suited
+      addAllOffsuitBroadways(g);
+      addAllSuitedBroadways(g);
+      // Offsuit Aces: A2o+
+      addA2oPlus(g);
+      // Suited Aces: ALL Axs
+      addAllAxs(g);
+      // Suited connectors: T9s–32s
+      addSuitedConnectorsDownTo(g, "32");
+      // Suited gappers: 97s–42s
+      addSuitedGappersRange(g, "9", "4");
+      // Offsuit connectors: T9o, 98o, 87o
+      addOffsuitConnectorsList(g, ["T9o","98o","87o"]);
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["K8s","Q8s","J7s","T7s","A9o","K9o","Q9o"])
+  },
+
+  SB: {
+    OPEN_GREEN: (()=>{ // ~35–40% (raise-or-fold; modern)
+      const g = new Set();
+      addPairs(g, "22");
+      // Aces
+      addA2oPlus(g);     // A2o+
+      addAllAxs(g);      // all Axs
+      // Suited broadways: ALL
+      addAllSuitedBroadways(g);
+      // Most offsuit broadways: KTo+, QTo+, JTo
+      addMostOffsuitBroadways_KTo_QTo_JTo(g);
+      // Suited connectors: T9s–54s
+      addSuitedConnectorsRange(g, "T9", "54");
+      // Suited gappers: 97s–64s
+      addSuitedGappersRange(g, "9", "6");
+      // Offsuit connectors: T9o, 98o
+      addOffsuitConnectorsList(g, ["T9o","98o"]);
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["AJo","KJo","QJo","J9s","T8s","76s"]) // kept from earlier
+  },
+
+  BB: {
+    // If everyone folds to BB & you raise (rare), use a wide but slightly tighter than SB set.
+    OPEN_GREEN: (()=>{ 
+      const g = new Set();
+      addPairs(g, "22");
+      addAllSuitedBroadways(g);
+      addMostOffsuitBroadways_KTo_QTo_JTo(g); // "most offsuit broadways"
+      addA2oPlus(g);      // A2o+
+      addAllAxs(g);       // all Axs
+      addSuitedConnectorsRange(g, "T9", "54");
+      addSuitedGappersRange(g, "9", "6");
+      return g;
+    })(),
+    OPEN_AMBER: new Set(["A9s","A8s","KJs","QTs","J9s","98s"])
+  }
+};
+
+// Ensure AMBER doesn’t duplicate GREEN (for cleaner coloring)
+(function deDupeAmber(){
+  Object.values(EXPLICIT_OPEN).forEach(seat=>{
+    if (!seat || !seat.OPEN_GREEN || !seat.OPEN_AMBER) return;
+    for (const code of seat.OPEN_GREEN) {
+      if (seat.OPEN_AMBER.has(code)) seat.OPEN_AMBER.delete(code);
+    }
+  });
+})();
 
 // ===== 3-bet & Defend masks (hybrid) =====
 const HYBRID_3BET_RANGES = {
@@ -1032,7 +1350,97 @@ const HYBRID_DEFEND_RANGES = {
 })();
 
 // Normalize a token -> explicit hand codes (keep your expandToken implementation)
-// ... (keep your expandToken and builders) ...
+// Normalize a token (e.g., "ATs-A5s", "A2o+", "TT+") into explicit hand codes.
+// Works with:
+//  - Pairs:  "TT+", "99"
+//  - Suited: "AQs+", "ATs-A5s", "T9s-54s", "KQs"
+//  - Offsuit:"A2o+", "KQo"
+// Notes:
+//  - RANKS_ASC = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"] (high -> low)
+//  - RANK_INDEX maps rank -> index in that array (smaller index = stronger rank).
+function expandToken(token){
+  token = token.replace(/[–—]/g, '-').trim();
+
+  // ---------- 1) PAIRS with "+" e.g., "TT+" ----------
+  if (/^([2-9TJQKA])\1\+$/.test(token)) {
+    const hi = token[0];                 // e.g., 'T'
+    const startIdx = RANKS_ASC.indexOf(hi);
+    // From AA down to TT: indices 0..startIdx inclusive
+    return RANKS_ASC.slice(0, startIdx + 1).map(r => r + r);
+  }
+
+  // ---------- 2) Single PAIR e.g., "99" ----------
+  if (/^([2-9TJQKA])\1$/.test(token)) {
+    return [token];
+  }
+
+  // ---------- 3) SUITED / OFFSUIT with "+" e.g., "A2o+", "K9s+" ----------
+  // Meaning: fix the first rank (hi) and sweep the second rank from 'lo' up to just below 'hi'.
+  if (/^[2-9TJQKA]{2}[so]\+$/.test(token)) {
+    const hi  = token[0];
+    const lo0 = token[1];
+    const sfx = token[2]; // 's' or 'o'
+    const hiIdx = RANK_INDEX[hi];      // e.g., 'A' -> 0
+    const loIdx0 = RANK_INDEX[lo0];    // e.g., '2' -> 12
+    const stopAt = hiIdx + 1;          // sweep down to just under 'hi' (e.g., A -> stop at K (idx 1))
+    const out = [];
+    // Walk indices DOWN: lo0, then stronger kickers approaching 'hi', but NOT past stopAt
+    for (let i = loIdx0; i >= stopAt; i--) {
+      const kicker = RANKS_ASC[i];
+      out.push(hi + kicker + sfx);
+    }
+    return out;
+  }
+
+  // ---------- 4) RANGED SUITED AX/Broadway e.g., "ATs-A5s" ----------
+  if (/^[2-9TJQKA]{2}s-[2-9TJQKA]{2}s$/.test(token)) {
+    const hi      = token[0];          // 'A' in "ATs-A5s"
+    const loStart = token[1];          // 'T'
+    const loEnd   = token[4];          // '5'
+    const startIdx = RANKS_ASC.indexOf(loStart);
+    const endIdx   = RANKS_ASC.indexOf(loEnd);
+    const out = [];
+    for (let i = startIdx; i <= endIdx; i++) {
+      const lo = RANKS_ASC[i];
+      if (RANK_INDEX[hi] < RANK_INDEX[lo]) out.push(hi + lo + 's');
+    }
+    return out;
+  }
+
+  // ---------- 5) RANGED SUITED CONNECTORS e.g., "T9s-54s" ----------
+  if (/^[2-9TJQKA][2-9TJQKA]s-[2-9TJQKA][2-9TJQKA]s$/.test(token)) {
+    const a = token.slice(0, 3);   // e.g., T9s
+    const b = token.slice(4, 7);   // e.g., 54s
+    const seq = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"]; // high -> low
+
+    // Find start like "T9s" in the descending chain; then move down until we hit "54s"
+    let out = [];
+    let startFound = false;
+    for (let i = 0; i < seq.length - 1; i++) {
+      const hi = seq[i], lo = seq[i+1];
+      const code = hi + lo + 's';
+      if (!startFound) {
+        if (code === a) { startFound = true; out.push(code); }
+      } else {
+        out.push(code);
+        if (code === b) break;
+      }
+    }
+    return out;
+  }
+
+  // ---------- 6) Single suited/offsuit like "KQs", "QJo" ----------
+  if (/^[2-9TJQKA]{2}[so]$/.test(token)) {
+    const hi = token[0], lo = token[1];
+    if (RANK_INDEX[hi] < RANK_INDEX[lo]) return [token]; // ensure hi > lo by rank strength
+    return [];
+  }
+
+  // ---------- 7) Edge fallback: raw two-rank "AK" (rare) ----------
+  if (/^[2-9TJQKA]{2}$/.test(token)) return [token];
+
+  return [];
+}
 
 function buildClassMapForPos(pos){
   const def = HYBRID_RANGES[pos] || {open:[], mix:[]};
@@ -1079,14 +1487,25 @@ function setPositionDisc(){
   const pos = currentPosition();
   if (positionDisc) positionDisc.textContent = pos;
 }
-function setPreflopBadge(){
+function setPreflopBadge() {
   if (!preflopRangeBadge) return;
-  if (STAGES[currentStageIndex]!=='preflop'){ preflopRangeBadge.classList.add('hidden'); return; }
+
+  // Hide badge in Intermediate AND Expert modes, or whenever not preflop
+  if (STAGES[currentStageIndex] !== 'preflop' ||
+      difficulty === 'intermediate' ||
+      difficulty === 'expert') {
+    preflopRangeBadge.classList.add('hidden');
+    return;
+  }
+
+  // Otherwise (Beginner mode & preflop): show normally
   const cls = classifyHeroHandAtPosition();
-  preflopRangeBadge.classList.remove('hidden','green','amber','red');
+
+  preflopRangeBadge.classList.remove('hidden', 'green', 'amber', 'red');
   preflopRangeBadge.textContent = `Preflop Range: ${cls}`;
-  if (cls==='Open') preflopRangeBadge.classList.add('green');
-  else if (cls==='Mix') preflopRangeBadge.classList.add('amber');
+
+  if (cls === 'Open') preflopRangeBadge.classList.add('green');
+  else if (cls === 'Mix') preflopRangeBadge.classList.add('amber');
   else preflopRangeBadge.classList.add('red');
 }
 
@@ -1135,11 +1554,12 @@ function openRangeModal(){
 
   // **** JSON preference for OPEN ****
   function classMapOpen() {
-    try{
-      if (RANGES_JSON?.open?.[seat]){
-        return mapFromFreqBucket(RANGES_JSON.open[seat]);
-      }
-    }catch(e){/* fallback */}
+           try{
+                   if (hasNonEmptySeatBucket(RANGES_JSON?.open, seat)){
+                  return mapFromFreqBucket(RANGES_JSON.open[seat]);
+               }
+          }catch(e){/* fallback */}
+
     const exp = (typeof EXPLICIT_OPEN !== 'undefined') ? EXPLICIT_OPEN[seat] : undefined
     if (exp && (exp.OPEN_GREEN?.size || exp.OPEN_AMBER?.size)) {
       const map = new Map();
@@ -1218,9 +1638,9 @@ const sourceLabel = (RANGES_JSON?.open?.[currentPosition()]) ? 'JSON' :
 
 rangeModalBody.innerHTML = controlsHtml +
   '<div style="margin-bottom:6px">' +
-    '<span class="badge info">Range source: ' + sourceLabel + '</span>' +
-  '</div>';
-
+  '<span class="badge info">Range source: ' + sourceLabel + '</span>' +
+  '</div>' +
+  '<div id="rangeSeatNote" class="range-help"></div>';
 rangeModalBody.appendChild(gridContainer);
 
   // Initial render: OPEN
@@ -1245,6 +1665,33 @@ rangeModalBody.appendChild(gridContainer);
     const active = [...tabs].find(t=>t.classList.contains('active'))?.getAttribute('data-mode') || 'open';
     setActiveMode(active);
   });
+
+// ---- BB UX: default to DEFEND and add note that BB never opens ----
+if (seat === 'BB') {
+  const noteEl = rangeModalBody.querySelector('#rangeSeatNote');
+  if (noteEl) {
+    noteEl.textContent = 'BB never opens preflop — use the Defend tab (vs opener).';
+  }
+  // Enable the VS selector (we need a villain opener)
+  vsSel.disabled = false;
+  // Pick a sensible default opener to defend against
+  vsSel.value = 'UTG';
+
+  // Disable the OPEN tab to avoid confusion
+  const openTab = [...tabs].find(t => t.getAttribute('data-mode') === 'open');
+  if (openTab) {
+    openTab.setAttribute('aria-disabled', 'true');
+    openTab.classList.add('disabled');
+    openTab.addEventListener('click', (e) => e.preventDefault());
+  }
+
+  // Switch the view to DEFEND
+  setActiveMode('defend');
+} else {
+  // Non-BB: clear any old BB note
+  const noteEl = rangeModalBody.querySelector('#rangeSeatNote');
+  if (noteEl) noteEl.textContent = '';
+}
 
   rangeModalOverlay.classList.remove('hidden');
 }
@@ -1761,20 +2208,24 @@ function startNewHand(){
   heroActions.turn    = { action:null, sizePct:null, barrel:null };
   heroActions.river   = { action:null, sizePct:null, barrel:null };
 
-  // Pot & blinds noise
-  const blinds=15;
-  const increments=[5,10];
-  let extra=0; const maxExtra=100;
-  while (extra<maxExtra){
-    const inc=increments[Math.floor(Math.random()*increments.length)];
-    if (extra+inc>maxExtra) break;
-    extra+=inc; if (Math.random()<0.3) break;
-  }
-  pot = toStep5(blinds + extra);
-  toCall = toStep5(10);
+  // Pot & blinds (tournament-friendly, no random noise)
+const sb = toStep5(BLINDS.sb), bb = toStep5(BLINDS.bb);
+pot = toStep5(sb + bb);
 
-  currentStageIndex = 0;
-  scenario = { label:"Preflop", potFactor:0 };
+// Preflop facing amount depends on hero seat
+const posNow = currentPosition();
+// BB already has BB in the pot → nothing to call
+if (posNow === 'BB') {
+  toCall = 0;
+} else if (posNow === 'SB') {
+  // SB has SB posted; to complete to BB preflop
+  toCall = toStep5(Math.max(0, bb - sb));
+} else {
+  // Other seats face a BB to call if unopened
+  toCall = bb;
+}
+currentStageIndex = 0;
+scenario = { label: "Preflop", potFactor: 0 };
 
   renderCards();
   setPositionDisc();
@@ -1865,6 +2316,53 @@ function endHand(){
   updateSessionStats();
 }
 
+function applyHeroContribution(decision){
+  const stage = STAGES[currentStageIndex];
+
+  // Folding can end the hand, as before
+  if (decision === 'fold') {
+    if (SETTINGS.pot.endHandOnFold) { endHand(); }
+    return;
+  }
+
+  if (decision === 'call') {
+    if (toCall > 0) {
+      pot = toStep5(pot + toCall);
+      toCall = 0;
+      updatePotInfo();
+    }
+    return;
+  }
+
+  if (decision === 'raise') {
+    if (stage === 'preflop') {
+      // Treat preflop “Raise” as an open/raise-to (size in BB)
+      const bb = toStep5(BLINDS.bb);
+      const sizeBB = (heroActions.preflop.sizeBb ?? 2.5);
+      const target = toStep5(sizeBB * bb); // "raise to" amount
+      // Hero puts full 'target' into pot when first-in; if facing completion (SB), this still functions as raise-to.
+      pot = toStep5(pot + target);
+      toCall = 0;
+      updatePotInfo();
+      return;
+    } else {
+      // Postflop: Bet (toCall==0) or Raise (toCall>0)
+      const pct = heroActions[stage].sizePct ?? 50;
+      const betBase = pot; // base is current pot
+      const betAmt = toStep5((pct/100) * betBase);
+
+      // If facing a bet, a raise is (call + extra). Keep it trainer-simple:
+      // raise contribution = toCall + betAmt
+      const putIn = (toCall > 0) ? toStep5(toCall + betAmt) : betAmt;
+
+      pot = toStep5(pot + putIn);
+      toCall = 0;
+      updatePotInfo();
+      return;
+    }
+  }
+}
+
 // ==================== Submit handling (with coaching) ====================
 inputForm.addEventListener("submit", (e)=>{
   e.preventDefault();
@@ -1926,16 +2424,9 @@ inputForm.addEventListener("submit", (e)=>{
     handTypes: equityStats.catBreakdown.slice(0,3)
   });
 
-  // Pot accumulation based on hero action
-  if (SETTINGS.pot.addHeroCallBetweenStreets){
-    if (decision==="call" || (decision==="raise" && SETTINGS.pot.treatRaiseAsCall)){
-      pot = toStep5(pot + toCall);
-      toCall = 0;
-      updatePotInfo();
-    } else if (decision==="fold" && SETTINGS.pot.endHandOnFold){
-      endHand(); return;
-    }
-  }
+// Pot accumulation using progressive + hero contributions (always £5-rounded)
+ applyHeroContribution(decision);
+   if (decision === 'fold') return; // endHand() may have been called
 
   // ===== Phase 1: Preflop coaching & data
   try{
@@ -2331,33 +2822,38 @@ function downloadCsv(){
   document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-// ==================== Settings panel ====================
 function createSettingsPanel(){
   const btn = document.createElement("button");
-  btn.id="settingsBtn"; btn.textContent="⚙︎ Settings"; btn.className="btn";
+  btn.id="settingsBtn"; btn.textContent="⚙️ Settings"; btn.className="btn";
   newHandBtn.parentNode.insertBefore(btn, newHandBtn.nextSibling);
 
   const panel = document.createElement("div");
   panel.id = "settingsPanel";
-  panel.style.cssText = "position:fixed;right:20px;top:80px;z-index:9999;background:#1f2937;color:#ecf0f1;border:1px solid #374151;border-radius:8px;padding:12px;min-width:320px;display:none;box-shadow:0 8px 24px rgba(0,0,0,.35)";
-
+  panel.style.cssText = "position:fixed;right:20px;top:80px;z-index:9999;background:#1f2937;color:#ecf0f1;border:1px solid #374151;border-radius:8px;padding:12px;min-width:340px;display:none;box-shadow:0 8px 24px rgba(0,0,0,.35)";
   panel.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <div style="font-weight:600">Trainer Settings</div>
       <button id="closeSettings" class="btn">✕</button>
     </div>
+
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
       <label>Baseline Opponents (6‑max: use 5)</label>
       <input type="number" id="set_playersBaseline" min="1" max="5" value="${Math.min(5, SETTINGS.sim.playersBaseline)}"/>
+
       <label>See Flop %</label>
       <input type="number" id="set_rateFlop" min="0" max="100" value="${Math.round(SETTINGS.sim.continueRate.flop*100)}"/>
+
       <label>See Turn %</label>
       <input type="number" id="set_rateTurn" min="0" max="100" value="${Math.round(SETTINGS.sim.continueRate.turn*100)}"/>
+
       <label>See River %</label>
       <input type="number" id="set_rateRiver" min="0" max="100" value="${Math.round(SETTINGS.sim.continueRate.river*100)}"/>
+
       <label>Range‑aware continuation</label>
       <input type="checkbox" id="set_rangeAware" ${SETTINGS.sim.rangeAwareContinuation ? 'checked' : ''}/>
+
       <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
+
       <label>Sim Quality</label>
       <select id="set_quality">
         <option ${SETTINGS.simQualityPreset==='Mobile'?'selected':''}>Mobile</option>
@@ -2365,20 +2861,31 @@ function createSettingsPanel(){
         <option ${SETTINGS.simQualityPreset==='Accurate'?'selected':''}>Accurate</option>
         <option ${SETTINGS.simQualityPreset==='Custom'?'selected':''}>Custom</option>
       </select>
+
       <label>Trials – Preflop</label>
-      <input type="number" id="set_trials_pre"  min="500" step="500" value="${SETTINGS.trialsByStage.preflop}"/>
+      <input type="number" id="set_trials_pre" min="500" step="500" value="${SETTINGS.trialsByStage.preflop}"/>
+
       <label>Trials – Flop</label>
       <input type="number" id="set_trials_flop" min="500" step="500" value="${SETTINGS.trialsByStage.flop}"/>
+
       <label>Trials – Turn</label>
       <input type="number" id="set_trials_turn" min="500" step="500" value="${SETTINGS.trialsByStage.turn}"/>
+
       <label>Trials – River</label>
-      <input type="number" id="set_trials_riv"  min="500" step="500" value="${SETTINGS.trialsByStage.river}"/>
+      <input type="number" id="set_trials_riv" min="500" step="500" value="${SETTINGS.trialsByStage.river}"/>
+
       <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
-      <label>Add hero call to pot</label>
-      <input type="checkbox" id="set_addCall" ${SETTINGS.pot.addHeroCallBetweenStreets ? 'checked' : ''}/>
-      <label>End hand on fold</label>
-      <input type="checkbox" id="set_endOnFold" ${SETTINGS.pot.endHandOnFold ? 'checked' : ''}/>
+
+      <!-- NEW: Blind editor -->
+      <label>Small Blind (£)</label>
+      <input type="number" id="set_sb" min="0" step="5" value="${toStep5(BLINDS.sb)}"/>
+
+      <label>Big Blind (£)</label>
+      <input type="number" id="set_bb" min="5" step="5" value="${toStep5(BLINDS.bb)}"/>
+
+      <button id="btn_next_level" class="btn" style="grid-column:1/3">Next Blinds Level</button>
     </div>
+
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
       <button id="applySettings" class="btn">Apply</button>
     </div>
@@ -2391,16 +2898,29 @@ function createSettingsPanel(){
     panel.querySelector("#set_trials_pre").value = SETTINGS.trialsByStage.preflop;
     panel.querySelector("#set_trials_flop").value = SETTINGS.trialsByStage.flop;
     panel.querySelector("#set_trials_turn").value = SETTINGS.trialsByStage.turn;
-    panel.querySelector("#set_trials_riv").value  = SETTINGS.trialsByStage.river;
+    panel.querySelector("#set_trials_riv").value = SETTINGS.trialsByStage.river;
   }
 
-  btn.addEventListener("click", ()=> { panel.style.display = panel.style.display==="none" ? "block" : "none"; });
-  panel.querySelector("#closeSettings").addEventListener("click", ()=> { panel.style.display = "none"; });
-  panel.querySelector("#applySettings").addEventListener("click", ()=>{
+  btn.addEventListener("click", () => { panel.style.display = panel.style.display==="none" ? "block" : "none"; });
+  panel.querySelector("#closeSettings").addEventListener("click", () => { panel.style.display = "none"; });
+
+  // NEW: Next blinds level (walk schedule & update fields/UI)
+  panel.querySelector("#btn_next_level").addEventListener("click", () => {
+    blindScheduleIdx = Math.min(BLIND_SCHEDULE.length-1, blindScheduleIdx + 1);
+    const [sb, bb] = BLIND_SCHEDULE[blindScheduleIdx];
+    BLINDS.sb = toStep5(sb); BLINDS.bb = toStep5(bb);
+    panel.querySelector("#set_sb").value = BLINDS.sb;
+    panel.querySelector("#set_bb").value = BLINDS.bb;
+    updatePotInfo();
+    btn.textContent = "⚙️ Settings ✓";
+    setTimeout(()=>btn.textContent="⚙️ Settings", 1200);
+  });
+
+  panel.querySelector("#applySettings").addEventListener("click", () => {
     SETTINGS.sim.playersBaseline = Math.max(1, Math.min(5, parseInt(panel.querySelector("#set_playersBaseline").value,10) || 4));
-    SETTINGS.sim.continueRate.flop  = Math.max(0, Math.min(1, (parseFloat(panel.querySelector("#set_rateFlop").value)||65)/100));
-    SETTINGS.sim.continueRate.turn  = Math.max(0, Math.min(1, (parseFloat(panel.querySelector("#set_rateTurn").value)||55)/100));
-    SETTINGS.sim.continueRate.river = Math.max(0, Math.min(1, (parseFloat(panel.querySelector("#set_rateRiver").value)||45)/100));
+    SETTINGS.sim.continueRate.flop  = Math.max(0, Math.min(1, ((parseFloat(panel.querySelector("#set_rateFlop").value)  || 65)/100)));
+    SETTINGS.sim.continueRate.turn  = Math.max(0, Math.min(1, ((parseFloat(panel.querySelector("#set_rateTurn").value)  || 55)/100)));
+    SETTINGS.sim.continueRate.river = Math.max(0, Math.min(1, ((parseFloat(panel.querySelector("#set_rateRiver").value) || 45)/100)));
     SETTINGS.sim.rangeAwareContinuation = !!panel.querySelector("#set_rangeAware").checked;
 
     const chosen = panel.querySelector("#set_quality").value;
@@ -2412,13 +2932,26 @@ function createSettingsPanel(){
       SETTINGS.trialsByStage.turn    = Math.max(500, parseInt(panel.querySelector("#set_trials_turn").value,10) || 8000);
       SETTINGS.trialsByStage.river   = Math.max(500, parseInt(panel.querySelector("#set_trials_riv").value,10)  || 12000);
     }
-    SETTINGS.pot.addHeroCallBetweenStreets = !!panel.querySelector("#set_addCall").checked;
-    SETTINGS.pot.endHandOnFold             = !!panel.querySelector("#set_endOnFold").checked;
 
-    btn.textContent = "⚙︎ Settings ✓";
-    setTimeout(()=>btn.textContent="⚙︎ Settings", 1200);
+    // NEW: apply blinds (always £5-rounded)
+    const newSB = toStep5(parseFloat(panel.querySelector("#set_sb").value) || BLINDS.sb);
+    const newBB = toStep5(parseFloat(panel.querySelector("#set_bb").value) || BLINDS.bb);
+    BLINDS = { sb: newSB, bb: newBB };
+
+    // Try to align schedule index to the chosen blinds if they match a schedule step
+    const idx = BLIND_SCHEDULE.findIndex(([sb,bb]) => sb===newSB && bb===newBB);
+    blindScheduleIdx = (idx >= 0) ? idx : blindScheduleIdx;
+
+    // Keep old toggles working
+    SETTINGS.pot.addHeroCallBetweenStreets = true;  // ignored by applyHeroContribution
+    SETTINGS.pot.endHandOnFold = SETTINGS.pot.endHandOnFold ?? true;
+
+    updatePotInfo();
+    btn.textContent = "⚙️ Settings ✓";
+    setTimeout(()=>btn.textContent="⚙️ Settings", 1200);
   });
 }
+``
 
 // ==================== Custom Ranges Loader & Adapter ====================
 // Store & access user-imported 3-decimal frequencies; prefer these when present.
@@ -2600,14 +3133,19 @@ difficultySelect.addEventListener("change", ()=>{
     timerRange.disabled = true;
     if (timerCountdownEl) timerCountdownEl.textContent = "No timer in Beginner Mode";
     if (kpiTimerEl) kpiTimerEl.textContent = "Time: —";
-  } else {
-    timerRange.disabled = false;
-    timerSeconds = parseInt(timerRange.value, 10) || 10;
-    timerValueEl.textContent = timerSeconds;
+   } else {
+           timerRange.disabled = false;
+
+       // Default Intermediate & Expert to 59 seconds
+         timerSeconds = 59;
+         timerRange.value = 59;
+         timerValueEl.textContent = "59";
+
     startTimer();
-  }
+}
   updatePotInfo();
   updateHintsImmediate();
+  setPreflopBadge();
 });
 timerRange.addEventListener("input", () => { timerSeconds = parseInt(timerRange.value, 10) || 10; timerValueEl.textContent = timerSeconds; });
 newHandBtn.addEventListener("click", () => { startNewHand(); });
@@ -2619,12 +3157,19 @@ resetStatsBtn.addEventListener("click", () => { clearSessionHistory(); });
 (function init(){
   loadSessionHistory();
   updateSessionStats();
-  timerSeconds = parseInt(timerRange.value, 10) || 10;
-  timerValueEl.textContent = timerSeconds;
-  difficulty = difficultySelect.value;
-  timerRange.disabled = true;
-  if (timerCountdownEl) timerCountdownEl.textContent = "No timer in Beginner Mode";
+ 
+difficulty = difficultySelect.value;
 
+if (difficulty === "beginner") {
+    timerRange.disabled = true;
+    timerSeconds = 0;
+    if (timerCountdownEl) timerCountdownEl.textContent = "No timer in Beginner Mode";
+} else {
+    timerRange.disabled = false;
+    timerSeconds = 59;
+    timerRange.value = 59;
+    timerValueEl.textContent = "59";
+}
   // Settings, UI wiring
   createSettingsPanel();
   setupPhase1UI();
