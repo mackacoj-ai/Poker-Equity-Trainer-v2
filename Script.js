@@ -794,15 +794,15 @@ function engineRecomputeSurvivorsForStreet(board){
   if (street === 'preflop') { ENGINE.survivors.clear(); ENGINE.lastStreetComputed = 'preflop'; return; }
 
   const prev = new Set(ENGINE.survivors);
-  if (street === 'flop'){
-    // Seed survivors: if Phase 1 produced an opener, include that seat;
-    // also include any 3-bettor; hero is *not* listed here (MC compares hero vs villains).
-    ENGINE.survivors.clear();
-    if (ENGINE.preflop.openerSeat) ENGINE.survivors.add(ENGINE.preflop.openerSeat);
-    if (ENGINE.preflop.threeBetterSeat) ENGINE.survivors.add(ENGINE.preflop.threeBetterSeat);
-    // Deterministically keep only those whose hand meets the rule on the flop
-    ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
-  } else if (street === 'turn'){
+if (street === 'flop'){
+  ENGINE.survivors.clear();
+  if (ENGINE.preflop.openerSeat) ENGINE.survivors.add(ENGINE.preflop.openerSeat);
+  if (ENGINE.preflop.threeBetterSeat) ENGINE.survivors.add(ENGINE.preflop.threeBetterSeat);
+  (ENGINE.preflop.coldCallers || []).forEach(seat => ENGINE.survivors.add(seat));
+  // Filter by deterministic continue rule
+  ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
+}  
+else if (street === 'turn'){
     // Re-evaluate currently alive villains
     ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
   } else if (street === 'river'){
@@ -822,9 +822,18 @@ function engineCurrentOpponents(board){
 }
 
 // Small hook from Phase 1 to remember opener / 3-bettor
-function engineSetPreflopContext(openerSeat, threeBetterSeat){
+function engineSetPreflopContext(openerSeat, threeBetterSeat, coldCallers){
   ENGINE.preflop.openerSeat = openerSeat || null;
   ENGINE.preflop.threeBetterSeat = threeBetterSeat || null;
+  ENGINE.preflop.coldCallers = Array.isArray(coldCallers) ? coldCallers.slice() : [];
+
+  // Keep a flat list of preflop participants — used if the hand ends preflop
+  const parts = [];
+  if (ENGINE.preflop.openerSeat) parts.push(ENGINE.preflop.openerSeat);
+  if (ENGINE.preflop.threeBetterSeat) parts.push(ENGINE.preflop.threeBetterSeat);
+  (ENGINE.preflop.coldCallers || []).forEach(s => parts.push(s));
+  ENGINE.preflop.participants = [...new Set(parts)];
+
   ENGINE.survivors.clear();
   ENGINE.survivorsByStreet = { flop: [], turn: [], river: [] };
   ENGINE.lastStreetComputed = 'preflop';
@@ -1693,6 +1702,7 @@ function runPreflopUpToHero(){
   let openToBb = null;               // raise-to (in BB)
   let threeBetterSeat = null;
   let threeBetToBb = null;
+ let coldCallers = [];
 
   // Walk seats in order until hero
   for (const s of ACTION_ORDER){
@@ -1725,6 +1735,7 @@ function runPreflopUpToHero(){
         // cold call to opener's raise
         const rTo = toStep5(openToBb * bb);
         potLocal = contributeCallTo(potLocal, rTo, s);
+   coldCallers.push(s);
         continue;
       }
       // else fold
@@ -1757,7 +1768,7 @@ function runPreflopUpToHero(){
   }
 
   return {
-    potLocal, toCallLocal, openerSeat, openToBb, threeBetterSeat, threeBetToBb, label
+    potLocal, toCallLocal, openerSeat, openToBb, threeBetterSeat, threeBetToBb, coldCallers, label
   };
 }
 
@@ -2578,7 +2589,7 @@ preflopAggressor = pf.openerSeat ? 'villain' : null;
 // Friendly label for the UI
 scenario = { label: pf.label, potFactor: 0 };
 
-engineSetPreflopContext(pf.openerSeat, pf.threeBetterSeat);
+engineSetPreflopContext(pf.openerSeat, pf.threeBetterSeat, pf.coldCallers);
 
   renderCards();
   setPositionDisc();
@@ -2673,7 +2684,16 @@ try{
   else if (reveal === 'on_hero_fold') shouldReveal = heroFolded;
 
   if (shouldReveal){
-    const who = ENGINE.survivorsByStreet.river.length ? ENGINE.survivorsByStreet.river : ENGINE.survivorsByStreet.turn.length ? ENGINE.survivorsByStreet.turn : ENGINE.survivorsByStreet.flop;
+   let who = ENGINE.survivorsByStreet.river.length ? ENGINE.survivorsByStreet.river
+        : (ENGINE.survivorsByStreet.turn.length ? ENGINE.survivorsByStreet.turn
+        : ENGINE.survivorsByStreet.flop);
+
+// If the hand ended before a board (preflop fold) or no survivors remained,
+// fall back to preflop participants so we can reveal something.
+if (!who || !who.length) {
+  const preParts = ENGINE.preflop?.participants || [];
+  who = preParts.length ? preParts : [];
+}
     if (who && who.length){
       const lines = who.map(seat => `${seat}: ${describeVillainHand(seatHand(seat))}`).join(' · ');
       feedbackEl.insertAdjacentHTML('beforeend', `<div style="margin-top:8px"><strong>Villain reveal:</strong> ${lines}</div>`);
