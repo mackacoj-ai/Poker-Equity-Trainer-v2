@@ -47,7 +47,6 @@ const nextStageBtn = document.getElementById("nextStageBtn");
 const resetStatsBtn = document.getElementById("resetStatsBtn");
 const kpiBlindsEl = document.getElementById("kpiBlinds");
 const blindsLabelEl = document.getElementById("blindsLabel");
-``
 
 // Mobile KPI bar
 const kpiStageEl = document.getElementById("kpiStage");
@@ -592,7 +591,9 @@ if (outsInfo.outsDetail.length > 0){
     ? `<div>£${toCall.toFixed(0)} to call into £${pot.toFixed(0)} → Pot odds <strong>${examplePotOdds.toFixed(1)}%</strong></div>`
     : ``;
 
-  const boardLine = `<span id="boardBadgeBar" class="board-badges" title="Tap for c-bet guide">${boardTags || '<span class="badge green">Stable</span>'}</span>`;
+ const boardLine = `<span id="boardBadgeBar" class="board-badges" title="Tap for c-bet guide">${
+  boardTags || '<span class="badge green">Stable</span>'
+}</span>`;
   const summaryHtml = `
            <div><strong>Board:</strong> ${boardLine}</div>
            <div><strong>Made:</strong> ${made.label} ${nutsBadge}</div>
@@ -714,6 +715,127 @@ function drawBiasedOpponentHand(d){
   }
   return [popRandomCard(d), popRandomCard(d)];
 }
+
+// ==================== Postflop Engine v1 (deterministic survivors) ====================
+// Keeps villain cards fixed (TABLE.seats) and decides who continues on each street.
+// Survivors are re-evaluated at flop/turn; river survivors always go to showdown.
+
+const ENGINE = {
+  // seats that are still contesting the pot (villain seats only)
+  survivors: new Set(),          // e.g., new Set(['CO','BTN'])
+  survivorsByStreet: { flop: [], turn: [], river: [] },
+  lastStreetComputed: 'preflop',
+  // A minimal preflop context (set in Phase 1 code after runPreflopUpToHero())
+  preflop: { openerSeat: null, threeBetterSeat: null }
+};
+
+// Convenience lookup for a villain seat's actual cards
+function seatHand(seat){
+  const s = TABLE.seats.find(x => x.seat === seat);
+  return s ? s.hand : null;
+}
+
+// --- Hand strength / connectivity rules (deterministic) ---
+// Uses evaluate7(..), detectStraightDrawFromAllCards(..), and analyzeBoard(..) already in your file.
+function villainHasPairPlus(hole, board){
+  const score = evaluate7(hole, board);
+  return (score.cat >= 1); // 1=one pair, 2=two pair, ...
+}
+function villainHasFlushOrOESD(hole, board){
+  const all = [...hole, ...board];
+  const suitCounts = {}; all.forEach(c => { suitCounts[c.suit] = (suitCounts[c.suit]??0)+1; });
+  const hasFD = Object.values(suitCounts).some(v => v >= 4);
+  const { openEnder } = detectStraightDrawFromAllCards(all);
+  return hasFD || openEnder;
+}
+function villainHasGutshotOnWet(hole, board){
+  const all = [...hole, ...board];
+  const texture = analyzeBoard(board, hole); // you already compute Wet/Semi-wet/etc
+  const wet = (texture.moistureBucket === 'Wet' || texture.moistureBucket === 'Semi‑wet');
+  const { gutshot } = detectStraightDrawFromAllCards(all);
+  return wet && gutshot;
+}
+
+// Deterministic continue rule per street
+// FLOP: continue if Pair+ OR (FD/OESD) OR (Gutshot on Wet/Semi-wet) OR (board paired and we have overcards + bdfd)
+// TURN: continue if still Pair+ OR (now FD/OESD) OR (picked up 2nd pair / trips / strong draw)
+// RIVER: all current survivors go to showdown
+function engineContinueOnStreet(seat, board){
+  const hole = seatHand(seat);
+  if (!hole || board.length < 3) return false; // shouldn't happen
+  if (board.length === 3){
+    if (villainHasPairPlus(hole, board)) return true;
+    if (villainHasFlushOrOESD(hole, board)) return true;
+    if (villainHasGutshotOnWet(hole, board)) return true;
+    // light extra: if board is paired and we have 2 overs (A/K/Q) we may peel once
+    const ranks = new Set(hole.map(c => c.rank));
+    const twoOvers = (ranks.has('A') && (ranks.has('K') || ranks.has('Q'))) ||
+                     (ranks.has('K') && ranks.has('Q'));
+    const bCounts = {}; board.forEach(c => { bCounts[c.rank]=(bCounts[c.rank]??0)+1; });
+    const paired = Object.values(bCounts).some(v => v >= 2);
+    if (paired && twoOvers) return true;
+    return false;
+  }
+  if (board.length === 4){
+    if (villainHasPairPlus(hole, board)) return true;
+    if (villainHasFlushOrOESD(hole, board)) return true;
+    // Small allowance: if we had a strong draw on flop and picked up extra equity, continue
+    const tex = analyzeBoard(board, hole);
+    if (tex.fourToStraight || tex.mono) return true;
+    return false;
+  }
+  // river: always continue to showdown if we got here
+  return true;
+}
+
+// Recompute survivors at beginning of each street
+function engineRecomputeSurvivorsForStreet(board){
+  const street = (board.length===3) ? 'flop' : (board.length===4 ? 'turn' : (board.length===5 ? 'river' : 'preflop'));
+  if (street === 'preflop') { ENGINE.survivors.clear(); ENGINE.lastStreetComputed = 'preflop'; return; }
+
+  const prev = new Set(ENGINE.survivors);
+  if (street === 'flop'){
+    // Seed survivors: if Phase 1 produced an opener, include that seat;
+    // also include any 3-bettor; hero is *not* listed here (MC compares hero vs villains).
+    ENGINE.survivors.clear();
+    if (ENGINE.preflop.openerSeat) ENGINE.survivors.add(ENGINE.preflop.openerSeat);
+    if (ENGINE.preflop.threeBetterSeat) ENGINE.survivors.add(ENGINE.preflop.threeBetterSeat);
+    // Deterministically keep only those whose hand meets the rule on the flop
+    ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
+  } else if (street === 'turn'){
+    // Re-evaluate currently alive villains
+    ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
+  } else if (street === 'river'){
+    // Everyone still alive goes to showdown (no filtering)
+    // keep ENGINE.survivors as-is
+  }
+  ENGINE.survivorsByStreet[street] = [...ENGINE.survivors];
+  ENGINE.lastStreetComputed = street;
+}
+
+// Helper for equity code to fetch current survivors
+function engineCurrentOpponents(board){
+  const street = (board.length===0) ? 'preflop' : (board.length===3 ? 'flop' : (board.length===4 ? 'turn' : 'river'));
+  if (street !== ENGINE.lastStreetComputed) engineRecomputeSurvivorsForStreet(board);
+  const hands = [...ENGINE.survivors].map(seat => seatHand(seat)).filter(Boolean);
+  return hands;
+}
+
+// Small hook from Phase 1 to remember opener / 3-bettor
+function engineSetPreflopContext(openerSeat, threeBetterSeat){
+  ENGINE.preflop.openerSeat = openerSeat || null;
+  ENGINE.preflop.threeBetterSeat = threeBetterSeat || null;
+  ENGINE.survivors.clear();
+  ENGINE.survivorsByStreet = { flop: [], turn: [], river: [] };
+  ENGINE.lastStreetComputed = 'preflop';
+}
+
+// Reveal helper for end-of-hand
+function describeVillainHand(h){
+  if (!h || h.length<2) return '';
+  return `${h[0].rank}${h[0].suit} ${h[1].rank}${h[1].suit}`;
+}
+
 function stageFromBoard(board){
   if (!board || board.length===0) return "preflop";
   if (board.length===3) return "flop";
@@ -782,7 +904,7 @@ function sampleShowdownOpponents(baselineCount, board, maybeOppHands, maybeDeck)
   }
   return survivors;
 }
-function computeEquityStats(hole, board){
+function computeEquityStatsLegacy(hole, board){
   const stage = stageFromBoard(board);
   const trials = SETTINGS.trialsByStage[stage] ?? 4000;
   const BASE_OPP = SETTINGS.sim.playersBaseline;
@@ -826,6 +948,63 @@ function computeEquityStats(hole, board){
   const catOrder = ['Straight Flush','Four of a Kind','Full House','Flush','Straight','Three of a Kind','Two Pair','One Pair','High Card'];
   catBreakdown.sort((a,b)=>{ const oi = catOrder.indexOf(a.name)-catOrder.indexOf(b.name); return oi!==0?oi:(b.pct-a.pct); });
   return { equity, winPct, tiePct, losePct, trials, catBreakdown, numOpp: Math.max(1, SETTINGS.sim.playersBaseline) };
+}
+
+// Survivor-aware MC using the actual villain hands from the engine.
+// - Opponent hole cards are FIXED (from Phase 1), only runouts are sampled.
+// - If no survivors are present, falls back to legacy (or injects 1 villain) to keep UI stable.
+function computeEquityStats(hole, board){
+  try{
+    const oppHands = engineCurrentOpponents(board); // fixed villain hands this street
+    if (!oppHands || oppHands.length===0){
+      // If absolutely nobody survived, keep charts functional with 1 opponent fallback
+      return computeEquityStatsLegacy(hole, board);
+    }
+    const stage = stageFromBoard(board);  // you already have this helper
+    const trials = SETTINGS.trialsByStage[stage] ?? 4000;
+
+    let wins=0, ties=0, losses=0; let equityAcc=0;
+    const catCount = new Map();
+
+    for (let t=0; t<trials; t++){
+      // Build runout deck without hero/villain cards & current board
+      const simDeck = createDeck().filter(c => 
+        !containsCard(hole,c) && !containsCard(board,c) &&
+        oppHands.every(h=>!containsCard(h,c))
+      );
+      // Sample the remaining board (runout only)
+      const need = 5 - board.length;
+      const simBoard = [...board];
+      for (let i=0;i<need;i++) simBoard.push(popRandomCard(simDeck));
+
+      const heroScore = evaluate7(hole, simBoard);
+      let better=0, equal=0;
+      for (let i=0;i<oppHands.length;i++){
+        const villainScore = evaluate7(oppHands[i], simBoard);
+        const cmp = compareScores(heroScore, villainScore);
+        if (cmp<0) better++;
+        else if (cmp===0) equal++;
+      }
+      if (better>0) losses++;
+      else if (equal>0){ ties++; equityAcc += 1/(equal+1); }
+      else { wins++; equityAcc += 1; }
+
+      const cat = CAT_NAME[heroScore.cat];
+      catCount.set(cat, (catCount.get(cat)??0)+1);
+    }
+
+    const winPct = (wins/trials)*100, tiePct=(ties/trials)*100, losePct=(losses/trials)*100;
+    const equity = (equityAcc/trials)*100;
+    const catBreakdown=[];
+    for (const [k,v] of catCount.entries()) catBreakdown.push({ name:k, pct:(v/trials)*100 });
+    const catOrder = ['Straight Flush','Four of a Kind','Full House','Flush','Straight','Three of a Kind','Two Pair','One Pair','High Card'];
+    catBreakdown.sort((a,b)=>{ const oi=catOrder.indexOf(a.name)-catOrder.indexOf(b.name); return oi!==0?oi:(b.pct-a.pct); });
+
+    return { equity, winPct, tiePct, losePct, trials, catBreakdown, numOpp: Math.max(1, oppHands.length) };
+  }catch(e){
+    console.warn('[engine-mc] survivor MC failed, using legacy', e);
+    return computeEquityStatsLegacy(hole, board);
+  }
 }
 
 // ==================== Scoring & decisions ====================
@@ -901,11 +1080,6 @@ function hasNonEmptySeatBucket(obj, seat) {
 
 
 // **** MODIFIED to prefer JSON frequencies when loaded ****
-
-function hasNonEmptySeatBucket(obj, seat) {
-  const b = obj?.[seat];
-  return b && typeof b === 'object' && Object.keys(b).length > 0;
-}
 
 function getClassMapForSeat(seat){
  // 1) Prefer imported JSON only if the seat bucket is non-empty
@@ -1236,119 +1410,6 @@ const HYBRID_DEFEND_RANGES = {
   SB:  { open:["—"], mix:["—"] } // SB defend special; often 3-bet/fold vs late opens
 };
 
-// ===== expandToken POLYFILL (deterministic, supports your tokens) =====
-// Requires RANKS_ASC (["A","K","Q","J","T","9","8","7","6","5","4","3","2"])
-// and RANK_INDEX (rank -> index in RANKS_ASC; smaller index = stronger)
-(function ensureExpandToken(){
-  if (typeof expandToken === 'function') return; // if already defined elsewhere, keep it
-
-  // Helpers
-  const RA = (typeof RANKS_ASC !== 'undefined') ? RANKS_ASC
-           : ["A","K","Q","J","T","9","8","7","6","5","4","3","2"];
-  const RI = (typeof RANK_INDEX !== 'undefined')
-           ? RANK_INDEX
-           : Object.fromEntries(RA.map((r,i)=>[r,i]));
-
-  function isRank(x){ return /^[2-9TJQKA]$/.test(x); }
-  function pairCodesFrom(hi){ // "TT+" --> AA..TT
-    const start = RA.indexOf(hi);
-    const out = [];
-    for (let i=0;i<=start;i++) out.push(RA[i]+RA[i]);
-    return out;
-  }
-  function plusLooper(hi, lo0, sfx){ // A2o+ -> AKo..A2o   ; K9s+ -> KQs..K9s
-    const hiIdx = RI[hi];
-    const stopAt = hiIdx + 1; // stop just under hi (A -> stop at K)
-    const out = [];
-    for (let i = RI[lo0]; i >= stopAt; i--){
-      const lo = RA[i];
-      if (RI[hi] < RI[lo]) out.push(hi + lo + sfx);
-    }
-    return out;
-  }
-  function suitedRangeATsToA5s(hi, loStart, loEnd){ // ATs-A5s
-    const out = [];
-    for (let i = RI[loStart]; i <= RI[loEnd]; i++){
-      const lo = RA[i];
-      if (RI[hi] < RI[lo]) out.push(hi + lo + 's');
-    }
-    return out;
-  }
-  function suitedConnectorsRange(a, b){ // T9s-54s
-    const out = [];
-    // a = T9s ; b = 54s. We walk downwards: T9, 98, 87, 76, 65, 54
-    const seq = RA; // A..2
-    let startFound = false;
-    for (let i=0; i<seq.length-1; i++){
-      const hi = seq[i], lo = seq[i+1];
-      const code = hi + lo + 's';
-      if (!startFound){
-        if (code === a){ startFound = true; out.push(code); }
-      } else {
-        out.push(code);
-        if (code === b) break;
-      }
-    }
-    return out;
-  }
-
-  // The polyfill
-  window.expandToken = function expandToken(token){
-    token = (token||"").trim().toUpperCase().replace(/[–—]/g,'-');
-    const out = [];
-
-    // 1) Pairs with "+" e.g., "TT+"
-    if (/^([2-9TJQKA])\1\+$/.test(token)) {
-      const hi = token[0];
-      return pairCodesFrom(hi);
-    }
-
-    // 2) Single pair e.g., "99"
-    if (/^([2-9TJQKA])\1$/.test(token)) {
-      return [token];
-    }
-
-    // 3) Single suited/offsuit e.g., "KQs", "QJo"
-    if (/^[2-9TJQKA]{2}[so]$/.test(token)) {
-      const hi = token[0], lo = token[1];
-      if (!isRank(hi) || !isRank(lo)) return [];
-      if (RI[hi] < RI[lo]) return [token];
-      return [];
-    }
-
-    // 4) Raw two-rank like "AK" (rare)
-    if (/^[2-9TJQKA]{2}$/.test(token)) {
-      const hi = token[0], lo = token[1];
-      if (RI[hi] < RI[lo]) return [token]; // treat as unspecified suitedness
-      return [];
-    }
-
-    // 5) Suited/offsuit with "+" e.g., "A2o+", "K9s+"
-    if (/^[2-9TJQKA]{2}[so]\+$/.test(token)) {
-      const hi = token[0], lo0 = token[1], sfx = token[2];
-      return plusLooper(hi, lo0, sfx);
-    }
-
-    // 6) Suited range "ATs-A5s"
-    if (/^[2-9TJQKA]{2}s-[2-9TJQKA]{2}s$/.test(token)) {
-      const hi = token[0];
-      const loStart = token[1];
-      const loEnd   = token[4];
-      return suitedRangeATsToA5s(hi, loStart, loEnd);
-    }
-
-    // 7) Suited connectors "T9s-54s"
-    if (/^[2-9TJQKA][2-9TJQKA]s-[2-9TJQKA][2-9TJQKA]s$/.test(token)) {
-      const a = token.slice(0,3); // e.g., T9s
-      const b = token.slice(4,7); // e.g., 54s
-      return suitedConnectorsRange(a,b);
-    }
-
-    // Fallback: unknown pattern -> []
-    return out;
-  };
-})();
-
 // Normalize a token -> explicit hand codes (keep your expandToken implementation)
 // Normalize a token (e.g., "ATs-A5s", "A2o+", "TT+") into explicit hand codes.
 // Works with:
@@ -1466,6 +1527,240 @@ function buildClassMapFromSets(openSet, mixSet){
   return map;
 }
 
+// ===== Fallbacks when RANGES_JSON is missing (Explicit / Hybrid) =====
+function explicitOpenClassFor(seat, code){
+  try{
+    const exp = (typeof EXPLICIT_OPEN !== 'undefined') ? EXPLICIT_OPEN[seat] : undefined;
+    if (!exp) return 'fold';
+    if (exp.OPEN_GREEN?.has(code)) return 'open';
+    if (exp.OPEN_AMBER?.has(code)) return 'mix';
+  }catch(e){}
+  return 'fold';
+}
+function hybridOpenClassFor(seat, code){
+  try{
+    const map = buildClassMapForPos(seat);  // already defined in your file
+    return map.get(code) || 'fold';
+  }catch(e){}
+  return 'fold';
+}
+function listToClassMap(lists){
+  // lists: {open:[tokens], mix:[tokens]}
+  if (!lists) return null;
+  const openSet = new Set((lists.open ?? []).flatMap(expandToken));
+  const mixSet  = new Set((lists.mix  ?? []).flatMap(expandToken));
+  return { openSet, mixSet };
+}
+function classFromLists(listMap, code){
+  if (!listMap) return 'fold';
+  if (listMap.openSet.has(code)) return 'open';
+  if (listMap.mixSet.has(code))  return 'mix';
+  return 'fold';
+}
+
+// ==================== Preflop Engine v1 (deterministic) ====================
+// Uses RANGES_JSON + built-ins to simulate villain actions up to hero's turn.
+// Priority: 3-bet > call > fold. Sizing: simple, deterministic (see below).
+
+// -- Table snapshot for this hand
+let TABLE = { seats: [] }; // [{ seat:'UTG', role:'hero'|'villain', hand:[c1,c2] }]
+
+// -- Helpers: codes, bucket tests, sizes
+function handToCode(h){
+  const [a,b] = h; const rA=a.rank, rB=b.rank, sA=a.suit, sB=b.suit;
+  if (rA===rB) return rA+rB;
+  const hi = (RANK_INDEX[rA] < RANK_INDEX[rB]) ? rA : rB;
+  const lo = (hi===rA) ? rB : rA;
+  return hi + lo + (sA===sB ? 's' : 'o');
+}
+
+// freqToClass is defined below in your ranges loader; use same thresholds
+function inBucket(bucketObj, code){
+  if (!bucketObj) return false;
+  const cls = freqToClass(bucketObj[code]);
+  return (cls==='open' || cls==='mix');
+}
+function canOpen(seat, code){
+  // 1) JSON if available
+  const jsonBucket = RANGES_JSON?.open?.[seat];
+  if (jsonBucket && inBucket(jsonBucket, code)) return true;
+  // 2) Explicit fallback
+  const expCls = explicitOpenClassFor(seat, code);
+  if (expCls === 'open' || expCls === 'mix') return true;
+  // 3) Hybrid fallback
+  const hybCls = hybridOpenClassFor(seat, code);
+  return (hybCls === 'open' || hybCls === 'mix');
+}
+function inThreeBetBucket(seat, opener, code){
+  // 1) JSON if available
+  const key = `${seat}_vs_${opener}`;
+  const json = RANGES_JSON?.three_bet?.[key];
+  if (json && inBucket(json, code)) return true;
+  // 2) Hybrid fallback (token lists)
+  const lists = HYBRID_3BET_RANGES?.[seat]?.[opener] ?? null;
+  const lm = listToClassMap(lists);
+  const cls = classFromLists(lm, code);
+  return (cls==='open' || cls==='mix');
+}
+function inCallBucket(seat, opener, code){
+  if (seat === 'BB'){
+    // 1) JSON BB defend
+    const key = `BB_vs_${opener}`;
+    const json = RANGES_JSON?.defend?.[key];
+    if (json && inBucket(json, code)) return true;
+    // 2) Hybrid defend fallback (by opener)
+    const lists = HYBRID_DEFEND_RANGES?.[opener] ?? null;
+    const lm = listToClassMap(lists);
+    const cls = classFromLists(lm, code);
+    return (cls==='open' || cls==='mix');
+  } else {
+    // 1) JSON non-BB call
+    const key = `${seat}_vs_${opener}`;
+    const call = RANGES_JSON?.vs_open?.[key]?.call;
+    if (call && inBucket(call, code)) return true;
+    // 2) Hybrid defend fallback (by opener)
+    const lists = HYBRID_DEFEND_RANGES?.[opener] ?? null;
+    const lm = listToClassMap(lists);
+    const cls = classFromLists(lm, code);
+    return (cls==='open' || cls==='mix');
+  }
+}
+
+// Open sizes (raise-to) by seat: midpoint of your guidance
+function standardOpenSizeBb(seat){
+  if (seat === 'SB') return 3.5;
+  // UTG/HJ/CO/BTN
+  return 2.2;
+}
+// 3-bet size (raise-to) vs an open size (in BB)
+function threeBetSizeBb(openerSeat, threeBetterSeat, openToBb){
+  // Heuristic IP/OOP
+  const ipSeats = new Set(['BTN','CO']); // rough IP heuristic for training
+  const threeBetterIP = ipSeats.has(threeBetterSeat) && !ipSeats.has(openerSeat);
+  const mult = threeBetterIP ? 3.0 : 4.0;
+  return Math.max(2.0 * openToBb, mult * openToBb);
+}
+
+// -- Action order (preflop always UTG → ... → BB)
+const ACTION_ORDER = ["UTG","HJ","CO","BTN","SB","BB"];
+
+// -- Seating for a new hand: hero seat rotates per your code; deal everyone
+function initTableForNewHand(){
+  TABLE.seats = ACTION_ORDER.map(seat => ({ seat, role:'villain', hand:null }));
+  const heroSeat = currentPosition();
+  // Mark hero
+  const idx = TABLE.seats.findIndex(s => s.seat === heroSeat);
+  if (idx >= 0) TABLE.seats[idx].role = 'hero';
+
+  // Hero already has holeCards; attach them and deal others from deck
+  TABLE.seats.forEach(s => {
+    if (s.role === 'hero'){
+      s.hand = [ holeCards[0], holeCards[1] ];
+    } else {
+      s.hand = [ dealCard(), dealCard() ];
+    }
+  });
+}
+
+// -- Compute pot contributions (trainer-simple, 'raise-to' contributions)
+function postedBlindFor(seat){
+  if (seat === 'SB') return toStep5(BLINDS.sb);
+  if (seat === 'BB') return toStep5(BLINDS.bb);
+  return 0;
+}
+
+// Add a "raise-to" (open/3-bet) contribution to pot (trainer-simple)
+function contributeRaiseTo(pot, raiseTo, seat){
+  // In this trainer, we simply add the full raise-to amount (as you do for hero).
+  // This keeps accounting consistent with applyHeroContribution(...).
+  return toStep5(pot + toStep5(raiseTo));
+}
+// Add a "call" contribution to pot
+function contributeCallTo(pot, targetTo, seat){
+  const already = postedBlindFor(seat);
+  const callAmt = Math.max(0, toStep5(targetTo) - toStep5(already));
+  return toStep5(pot + callAmt);
+}
+
+// -- Run villains up to hero
+function runPreflopUpToHero(){
+  const heroSeat = currentPosition();
+  const sb = toStep5(BLINDS.sb), bb = toStep5(BLINDS.bb);
+
+  let potLocal = toStep5(sb + bb);   // blinds posted
+  let toCallLocal = 0;               // what hero must call when their turn arrives
+  let openerSeat = null;
+  let openToBb = null;               // raise-to (in BB)
+  let threeBetterSeat = null;
+  let threeBetToBb = null;
+
+  // Walk seats in order until hero
+  for (const s of ACTION_ORDER){
+    const isHero = (s === heroSeat);
+    if (isHero) break; // stop before hero acts
+
+    const seatObj = TABLE.seats.find(x => x.seat === s);
+    const code = handToCode(seatObj.hand);
+
+    if (!openerSeat){
+      // No opener yet -- can this seat open?
+      if (canOpen(s, code)){
+        openerSeat = s;
+        openToBb = standardOpenSizeBb(s);
+        const raiseTo = toStep5(openToBb * bb);
+        potLocal = contributeRaiseTo(potLocal, raiseTo, s);
+        continue;
+      }
+      // otherwise fold
+    } else {
+      // We have an opener; 3-bet > call > fold
+      if (inThreeBetBucket(s, openerSeat, code)){
+        threeBetterSeat = s;
+        threeBetToBb = threeBetSizeBb(openerSeat, s, openToBb);
+        const rTo = toStep5(threeBetToBb * bb);
+        potLocal = contributeRaiseTo(potLocal, rTo, s);
+        break; // hero will face 3-bet/4-bet tree; stop here
+      }
+      if (inCallBucket(s, openerSeat, code)){
+        // cold call to opener's raise
+        const rTo = toStep5(openToBb * bb);
+        potLocal = contributeCallTo(potLocal, rTo, s);
+        continue;
+      }
+      // else fold
+    }
+  }
+
+  // Compute hero toCall
+  const heroBlind = (heroSeat==='SB') ? sb : (heroSeat==='BB' ? bb : 0);
+  if (!openerSeat){
+    // Unopened pot to hero -> hero faces BB unless hero is SB (complete) or BB (check)
+    if (heroSeat === 'BB') toCallLocal = 0;
+    else if (heroSeat === 'SB') toCallLocal = Math.max(0, bb - sb);
+    else toCallLocal = bb;
+  } else if (threeBetterSeat){
+    const rTo = toStep5(threeBetToBb * bb);
+    toCallLocal = Math.max(0, rTo - heroBlind);
+  } else {
+    const rTo = toStep5(openToBb * bb);
+    toCallLocal = Math.max(0, rTo - heroBlind);
+  }
+
+  // Scenario label for the UI (coaching friendly)
+  let label = 'Preflop';
+  if (openerSeat && !threeBetterSeat){
+    label = `${openerSeat} opened ${openToBb.toFixed(1)}x`;
+    // add note if any cold-call occurred (pot would be larger than blinds+open)
+    if (potLocal > toStep5(sb + bb + toStep5(openToBb * bb))) label += ' · cold call';
+  } else if (openerSeat && threeBetterSeat){
+    label = `${openerSeat} opened ${openToBb.toFixed(1)}x · ${threeBetterSeat} 3‑bet ${threeBetToBb.toFixed(1)}x`;
+  }
+
+  return {
+    potLocal, toCallLocal, openerSeat, openToBb, threeBetterSeat, threeBetToBb, label
+  };
+}
+
 function currentPosition(){ return POSITIONS6[heroPosIdx % POSITIONS6.length]; }
 function heroHandCode(){
   const [c1,c2]=holeCards;
@@ -1536,6 +1831,15 @@ function openRangeModal(){
     </div>
   `;
 
+const defendToggleHtml = `
+  <div id="defendToggle" class="tabbar" role="tablist" aria-label="Defend action" style="display:none;margin-bottom:6px">
+    <button class="tab active" data-sub="call" role="tab" aria-selected="true">Call</button>
+    <button class="tab" data-sub="three_bet" role="tab">3‑bet</button>
+  </div>
+`;
+
+
+
   const gridContainer = document.createElement('div');
   gridContainer.className = 'range-grid';
   const NO_DATA_HTML = `
@@ -1594,18 +1898,36 @@ function openRangeModal(){
     return classMapFromLists(branch);
   }
 
-  // **** JSON preference for DEFEND (BB vs opener) ****
-  function classMapDefend(vsSeat) {
-    if (seat !== 'BB') return null;
-    try{
+// **** JSON preference for DEFEND / VS‑OPEN ****
+// subAction: 'call' | 'three_bet'
+
+	function classMapDefend(vsSeat, subAction) {
+  // 3‑bet path delegates to three_bet map for all seats
+  	if (subAction === 'three_bet') {
+  	  return classMap3bet(vsSeat);
+ 	 }
+  // CALL path
+  	if (seat === 'BB') {
+    // BB defend flats from 'defend.BB_vs_<Opener>'
+  	  try{
       const key = `BB_vs_${vsSeat}`;
       if (RANGES_JSON?.defend?.[key]){
         return mapFromFreqBucket(RANGES_JSON.defend[key]);
       }
-    }catch(e){/* fallback */}
-    const branch = HYBRID_DEFEND_RANGES[vsSeat] ?? null;
-    return classMapFromLists(branch);
-  }
+   	 }catch(e){/* fallback */}
+    	const branch = HYBRID_DEFEND_RANGES[vsSeat] ?? null;
+   	 return classMapFromLists(branch);
+ 	 } else {
+    // Non‑BB: use vs_open.<Seat>_vs_<Opener>.call
+  		  try{
+     		 const key = `${seat}_vs_${vsSeat}`;
+      		const callObj = RANGES_JSON?.vs_open?.[key]?.call;
+     		 if (callObj) return mapFromFreqBucket(callObj);
+   		 }catch(e){/* ignore */}
+    		// no data
+    		return null;
+ 	 }
+	}
 
   function renderGridOrEmpty(clsMap){
     if (!clsMap) {
@@ -1636,7 +1958,7 @@ function openRangeModal(){
 const sourceLabel = (RANGES_JSON?.open?.[currentPosition()]) ? 'JSON' :
                     ((typeof EXPLICIT_OPEN !== 'undefined') ? 'Explicit' : 'Hybrid');
 
-rangeModalBody.innerHTML = controlsHtml +
+rangeModalBody.innerHTML = controlsHtml + defendToggleHtml +
   '<div style="margin-bottom:6px">' +
   '<span class="badge info">Range source: ' + sourceLabel + '</span>' +
   '</div>' +
@@ -1649,16 +1971,42 @@ rangeModalBody.appendChild(gridContainer);
   const tabs = rangeModalBody.querySelectorAll('.tabbar .tab');
   const vsSel = rangeModalBody.querySelector('#rangeVsSelect');
 
-  function setActiveMode(mode){
-    tabs.forEach(t=>t.classList.toggle('active', t.getAttribute('data-mode')===mode));
-    const enableVs = (mode !== 'open');
-    vsSel.disabled = !enableVs;
-    let clsMap = null;
-    if (mode==='open') clsMap = classMapOpen();
-    else if (mode==='3bet') clsMap = classMap3bet(vsSel.value);
-    else clsMap = classMapDefend(vsSel.value);
-    renderGridOrEmpty(clsMap);
+let defendSubAction = 'call';
+const defendToggle = () => document.getElementById('defendToggle');
+
+function setActiveMode(mode){
+  tabs.forEach(t=>t.classList.toggle('active', t.getAttribute('data-mode')===mode));
+  const enableVs = (mode !== 'open');
+  vsSel.disabled = !enableVs;
+
+  // Show/hide the Defend sub‑toggle
+  const dt = defendToggle();
+  if (dt) dt.style.display = (mode==='defend') ? 'inline-flex' : 'none';
+
+  let clsMap = null;
+  if (mode==='open') {
+    clsMap = classMapOpen();
+  } else if (mode==='3bet') {
+    clsMap = classMap3bet(vsSel.value);
+  } else { // defend
+    clsMap = classMapDefend(vsSel.value, defendSubAction);
   }
+  renderGridOrEmpty(clsMap);
+}
+
+
+
+(function wireDefendToggle(){
+  const dt = defendToggle(); if (!dt) return;
+  dt.addEventListener('click', (e)=>{
+    const btn = e.target.closest('.tab'); if (!btn) return;
+    dt.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    btn.classList.add('active');
+    defendSubAction = btn.getAttribute('data-sub') || 'call';
+    setActiveMode('defend');
+  });
+})();
+
 
   tabs.forEach(t=> t.addEventListener('click', ()=> setActiveMode(t.getAttribute('data-mode'))));
   vsSel.addEventListener('change', ()=>{
@@ -1686,12 +2034,13 @@ if (seat === 'BB') {
   }
 
   // Switch the view to DEFEND
+
   setActiveMode('defend');
 } else {
-  // Non-BB: clear any old BB note
   const noteEl = rangeModalBody.querySelector('#rangeSeatNote');
-  if (noteEl) noteEl.textContent = '';
+  if (noteEl) noteEl.textContent = 'Vs Open: choose Call or 3‑bet against the selected opener seat.';
 }
+
 
   rangeModalOverlay.classList.remove('hidden');
 }
@@ -1846,6 +2195,7 @@ const CBET_GUIDE = {
   "A_HIGH_RAINBOW":    { label:"A‑High Rainbow",   freq:"High", sizes:[25,33],   note:"Range & nut advantage → small, frequent bets." },
   "LOW_DISCONNECTED":  { label:"Low Disconnected", freq:"High", sizes:[25,33],   note:"Deny equity to overcards; small bets perform well." },
   "PAIRED_LOW":        { label:"Paired (Low)",     freq:"Med",  sizes:[33,66],   note:"Mix checks; when betting, lean small‑to‑medium." },
+  "HIGH_PAIR": { label:"High Paired (T+)", freq:"Low", sizes:[25,33], note:"Equity is flat; ranges are capped. Check often; when betting, stay small and polarized." },
   "BROADWAY_HEAVY":    { label:"Broadway‑Heavy",   freq:"Med",  sizes:[33,50],   note:"Ranges interact; favour small/medium in position." },
   "TWO_TONE_DYNAMIC":  { label:"Two‑tone / Wet",   freq:"Low",  sizes:[66,100],  note:"Lower freq; size up to tax draws." },
   "MONOTONE":          { label:"Monotone",         freq:"Low",  sizes:[66,100],  note:"Compressed equities; polar bigger bets or checks." },
@@ -1875,6 +2225,7 @@ function mapBoardToCategory(board, hole){
   const twoTone = (board.length>=3 && suits.size===2 && !tex.mono);
   if (twoTone && (tex.connected || boardHasManyBroadways(board))) return "TWO_TONE_DYNAMIC";
   if (boardPairedRankAtMost(board, "9")) return "PAIRED_LOW";
+  if (boardPairedRankAtMost(board, "A") && !boardPairedRankAtMost(board, "9")) return "HIGH_PAIR";
   if (isAHighRainbowDry(board)) return "A_HIGH_RAINBOW";
   if (boardHasManyBroadways(board)) return "BROADWAY_HEAVY";
   return "LOW_DISCONNECTED";
@@ -2179,7 +2530,7 @@ function insertInlineSwingBadge(deltaPct, severity, note){
 }
 
 // ==================== Hand flow ====================
-function startNewHand(){
+async function startNewHand(){
   summaryPanel.style.display = "none";
   feedbackEl.innerHTML = "";
   hintsEl.textContent = "";
@@ -2193,6 +2544,14 @@ function startNewHand(){
   nextStageBtn.classList.add("hidden");
   if (barSubmit) barSubmit.classList.remove("hidden");
   if (barNext) barNext.classList.add("hidden");
+
+// Ensure ranges are in memory (URL or Local Storage), no-op if already set
+await ensureRangesLoaded();
+// If Local Storage has ranges, copy them into memory (guards file:// case)
+if (!RANGES_JSON) {
+  const raw = localStorage.getItem('trainer_ranges_json_v1');
+  if (raw) { try { RANGES_JSON = JSON.parse(raw); } catch(e){} }
+}
 
   deck = createDeck(); shuffle(deck);
   holeCards = [dealCard(), dealCard()];
@@ -2208,24 +2567,18 @@ function startNewHand(){
   heroActions.turn    = { action:null, sizePct:null, barrel:null };
   heroActions.river   = { action:null, sizePct:null, barrel:null };
 
-  // Pot & blinds (tournament-friendly, no random noise)
+// === Phase 1 engine: build table + villains' actions up to hero ===
 const sb = toStep5(BLINDS.sb), bb = toStep5(BLINDS.bb);
-pot = toStep5(sb + bb);
-
-// Preflop facing amount depends on hero seat
-const posNow = currentPosition();
-// BB already has BB in the pot → nothing to call
-if (posNow === 'BB') {
-  toCall = 0;
-} else if (posNow === 'SB') {
-  // SB has SB posted; to complete to BB preflop
-  toCall = toStep5(Math.max(0, bb - sb));
-} else {
-  // Other seats face a BB to call if unopened
-  toCall = bb;
-}
+initTableForNewHand();
+const pf = runPreflopUpToHero();
+pot = pf.potLocal;
+toCall = pf.toCallLocal;
 currentStageIndex = 0;
-scenario = { label: "Preflop", potFactor: 0 };
+preflopAggressor = pf.openerSeat ? 'villain' : null;
+// Friendly label for the UI
+scenario = { label: pf.label, potFactor: 0 };
+
+engineSetPreflopContext(pf.openerSeat, pf.threeBetterSeat);
 
   renderCards();
   setPositionDisc();
@@ -2260,11 +2613,9 @@ function advanceStage(){
   if (stage==="flop"){ boardCards.push(dealCard(), dealCard(), dealCard()); }
   else if (stage==="turn" || stage==="river"){ boardCards.push(dealCard()); }
 
-  // Scenario & pot update
-  scenario = randomScenario();
-  const { bet, newPot } = computeRoundedBetAndPot(pot, scenario.potFactor);
-  toCall = bet; pot = newPot;
-
+  // Recompute survivors for this street (villain fold/continue is deterministic)
+  try { engineRecomputeSurvivorsForStreet(boardCards); } catch(e){}
+ 
   // --- Compute new equity and evaluate swing (with transition reasons) ---
   let newEquity = null, delta = null;
   try {
@@ -2309,6 +2660,26 @@ function endHand(){
 
   // Clear KPI swing chip at hand end
   updateKpiEquitySwing(0, null);
+
+// Villain reveal (Always / Showdown-only / On hero fold)
+try{
+  const reveal = (REVEAL?.policy ?? 'showdown_only');
+  const heroFolded = handHistory.some(h => (h.stage==='preflop' || h.stage==='flop' || h.stage==='turn' || h.stage==='river') && h.decision==='fold');
+  const reachedRiver = (boardCards.length === 5);
+
+  let shouldReveal = false;
+  if (reveal === 'always_all') shouldReveal = true;
+  else if (reveal === 'showdown_only') shouldReveal = reachedRiver;
+  else if (reveal === 'on_hero_fold') shouldReveal = heroFolded;
+
+  if (shouldReveal){
+    const who = ENGINE.survivorsByStreet.river.length ? ENGINE.survivorsByStreet.river : ENGINE.survivorsByStreet.turn.length ? ENGINE.survivorsByStreet.turn : ENGINE.survivorsByStreet.flop;
+    if (who && who.length){
+      const lines = who.map(seat => `${seat}: ${describeVillainHand(seatHand(seat))}`).join(' · ');
+      feedbackEl.insertAdjacentHTML('beforeend', `<div style="margin-top:8px"><strong>Villain reveal:</strong> ${lines}</div>`);
+    }
+  }
+}catch(e){}
 
   showSummary();
   sessionHistory.push(...handHistory);
@@ -2822,6 +3193,11 @@ function downloadCsv(){
   document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
+// Villain reveal policy state
+const REVEAL = {
+  policy: 'showdown_only' // 'always_all' | 'showdown_only' | 'on_hero_fold'
+};
+
 function createSettingsPanel(){
   const btn = document.createElement("button");
   btn.id="settingsBtn"; btn.textContent="⚙️ Settings"; btn.className="btn";
@@ -2875,6 +3251,15 @@ function createSettingsPanel(){
       <input type="number" id="set_trials_riv" min="500" step="500" value="${SETTINGS.trialsByStage.river}"/>
 
       <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
+
+
+<div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
+<label>Villain reveal</label>
+<select id="set_reveal_policy">
+  <option value="always_all">Always show all</option>
+  <option value="showdown_only" selected>Show only at showdown</option>
+  <option value="on_hero_fold">Show remaining villains when hero folds</option>
+</select>
 
       <!-- NEW: Blind editor -->
       <label>Small Blind (£)</label>
@@ -2933,6 +3318,11 @@ function createSettingsPanel(){
       SETTINGS.trialsByStage.river   = Math.max(500, parseInt(panel.querySelector("#set_trials_riv").value,10)  || 12000);
     }
 
+
+// Save villain reveal policy
+const rp = panel.querySelector('#set_reveal_policy');
+if (rp) REVEAL.policy = rp.value || 'showdown_only';
+
     // NEW: apply blinds (always £5-rounded)
     const newSB = toStep5(parseFloat(panel.querySelector("#set_sb").value) || BLINDS.sb);
     const newBB = toStep5(parseFloat(panel.querySelector("#set_bb").value) || BLINDS.bb);
@@ -2951,7 +3341,6 @@ function createSettingsPanel(){
     setTimeout(()=>btn.textContent="⚙️ Settings", 1200);
   });
 }
-``
 
 // ==================== Custom Ranges Loader & Adapter ====================
 // Store & access user-imported 3-decimal frequencies; prefer these when present.
@@ -3148,7 +3537,7 @@ difficultySelect.addEventListener("change", ()=>{
   setPreflopBadge();
 });
 timerRange.addEventListener("input", () => { timerSeconds = parseInt(timerRange.value, 10) || 10; timerValueEl.textContent = timerSeconds; });
-newHandBtn.addEventListener("click", () => { startNewHand(); });
+newHandBtn.addEventListener("click", async () => { await startNewHand(); });
 downloadCsvBtn.addEventListener("click", () => { downloadCsv(); });
 closeSummaryBtn.addEventListener("click", () => { summaryPanel.style.display = "none"; });
 resetStatsBtn.addEventListener("click", () => { clearSessionHistory(); });
