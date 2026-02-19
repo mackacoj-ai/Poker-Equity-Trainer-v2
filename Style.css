@@ -237,7 +237,6 @@ body.compact-auto .primary{ padding:9px 14px; }
 }
 
 /* ===== Settings panel ===== */
-#settingsOverlay{ position:fixed; inset:0; background:rgba(0,0,0,.5); backdrop-filter:blur(2px); z-index:998; display:none; }
 #settingsPanel{ max-height:85vh; overflow:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch; }
 
 /* ===== Phase 1: Position & Preflop Range ===== */
@@ -410,7 +409,188 @@ body.compact-auto .primary{ padding:9px 14px; }
   cursor: not-allowed;
 }
 
+/* ===== Position Status Discs ===== */
+.position-status-row {
+    display: flex;
+    gap: 10px;
+    margin: 10px 0 15px;
+    align-items: center;
+}
 
+.pos-disc-villain {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 0.8rem;
+    border: 2px solid #1e2a44;
+    box-shadow: var(--shadow-1);
+}
+
+.pos-status-in { 
+    background: #065f46; 
+    color: #d1fae5;
+}
+
+.pos-status-folded-now { 
+    background: #7f1d1d; 
+    color: #fecaca;
+}
+
+.pos-status-folded-prev { 
+    background: #374151; 
+    color: #d1d5db;
+    opacity: 0.6;
+}
+
+.pos-status-hero { 
+    background: #ffffff;
+    color: #0f172a;
+    border: 2px solid #d1d5db;
+}
+
+.pos-badge-pfr {
+    background: #fbbf24;
+    color: #0f172a;
+    font-size: 0.65rem;
+    padding: 2px 6px;
+    border-radius: 6px;
+    margin-left: 4px;
+    font-weight: 900;
+}
+
+/* Preflop Walk banner */
+.walk-banner {
+    margin-top: 8px;
+    background: #052e1b;
+    color: #d1fae5;
+    border: 1px solid #10b981;
+    border-radius: 10px;
+    padding: 8px 12px;
+    box-shadow: var(--shadow-1);
+    font-weight: 800;
+    letter-spacing: .2px;
+}
+
+/* ===== Position discs row - stack label (PFR) BELOW disc ===== */
+.position-status-row {
+  display: flex;
+  gap: 12px;
+  margin: 10px 0 15px;
+  align-items: flex-start; /* allow vertical stacking */
+}
+
+/* Outer vertical stack for each seat (disc on top, badge below) */
+.pos-seat-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px; /* space between disc and PFR pill */
+  min-width: 42px; /* keeps columns neat */
+}
+
+/* Disc itself (villain or hero) */
+.pos-disc-villain {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 0.8rem;
+  border: 2px solid #1e2a44;
+  box-shadow: var(--shadow-1);
+}
+
+/* Status colours */
+.pos-status-in { 
+  background: #065f46;  /* green */
+  color: #d1fae5;
+}
+.pos-status-folded-now { 
+  background: #7f1d1d;  /* red */
+  color: #fecaca;
+}
+.pos-status-folded-prev { 
+  background: #374151;  /* grey */
+  color: #d1d5db;
+  opacity: 0.6;
+}
+/* Hero disc keeps your white style */
+.pos-status-hero { 
+  background: #ffffff;
+  color: #0f172a;
+  border: 2px solid #d1d5db;
+}
+
+/* NEW: Blue PFR pill shown below the disc */
+.pos-badge-pfr {
+  background: #1e3a8a;       /* deep blue */
+  color: #e2e8f0;            /* light text */
+  font-size: 0.68rem;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-weight: 900;
+  letter-spacing: .2px;
+  border: 1px solid #3b82f6; /* blue border */
+  box-shadow: var(--shadow-1);
+}
+
+/* ===== Tooltip for the blue PFR pill ===== */
+.pos-badge-pfr {
+  position: relative;           /* needed for the tooltip anchor */
+}
+
+/* Use a data attribute so we can style a custom tooltip */
+.pos-badge-pfr[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);     /* show ABOVE the pill */
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: #0b1222;          /* dark bubble that matches your UI */
+  color: #e6eefc;
+  border: 1px solid #20304a;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 0.72rem;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s ease;
+  box-shadow: var(--shadow-1);
+  z-index: 20;
+}
+
+/* Show on hover or keyboard focus */
+.pos-badge-pfr:hover::after,
+.pos-badge-pfr:focus-visible::after {
+  opacity: 1;
+}
+
+/* Optional: a little arrow */
+.pos-badge-pfr[data-tip]::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #20304a;    /* border colour matches bubble border */
+  margin-bottom: -1px;          /* snug fit with border */
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.pos-badge-pfr:hover::before,
+.pos-badge-pfr:focus-visible::before {
+  opacity: 1;
+}
 
 /* =========================================================
    Stability override (kept small) — ensures preflop heatmap
