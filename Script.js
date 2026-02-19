@@ -646,18 +646,30 @@ function isProbableNutsPreRiver(hole, board, samples=800){
   return { abs:false, beaters, likely: beaters===0 };
 }
 
-// ==================== Scenarios (street bet sizing noise) ====================
-const SCENARIOS = [
-  { label: "Strong hand slow play", potFactor: 0.3 },
-  { label: "Drawing hand stab", potFactor: 0.6 },
-  { label: "Polarised shove", potFactor: 1.0 },
-  { label: "Weird small bet", potFactor: 0.2 },
-  { label: "Overbet pressure", potFactor: 1.5 }
-];
-function randomScenario(){
-  const idx = Math.floor(Math.random()*SCENARIOS.length);
-  return SCENARIOS[idx];
-}
+
+// ==================== Villain betting engine settings ====================
+const VILLAIN = {
+  // Betting frequencies by guide bucket (c-bet / probe)
+  betFreq:  { High: 0.70, Med: 0.45, Low: 0.25 },   // PFR on flop/turn/river
+  probeFreq:{ High: 0.55, Med: 0.40, Low: 0.20 },   // Non-PFR stab (flop/turn)
+  raiseOverBetFreq: 0.12,                            // chance to raise over an existing bet pre-hero
+  sizeJitter: 0.15,                                  // ±15% jitter on preset sizes
+  // After hero bets into field, fraction of alive villains that flat-call
+  callFracAfterHeroBet: 0.35,
+  // Fold propensity facing a bet when weak
+  foldFracFacingBetWeak: 0.65
+};
+
+// Small per-street context (used to settle after hero acts)
+let STREET_CTX = {
+  stage: '',           // 'flop' | 'turn' | 'river'
+  potAtStart: 0,       // pot before any villain/hero action this street
+  openBettor: null,    // first villain who bet before hero (if any)
+  openSizePct: null    // their nominal size (for UI / logs if you want later)
+};
+
+// Canonical postflop order (first to act is SB postflop)
+const POSTFLOP_ORDER = ["SB","BB","UTG","HJ","CO","BTN"];
 
 // ==================== Equity simulation ====================
 const CAT_NAME = {
@@ -721,12 +733,20 @@ function drawBiasedOpponentHand(d){
 // Survivors are re-evaluated at flop/turn; river survivors always go to showdown.
 
 const ENGINE = {
-  // seats that are still contesting the pot (villain seats only)
-  survivors: new Set(),          // e.g., new Set(['CO','BTN'])
-  survivorsByStreet: { flop: [], turn: [], river: [] },
-  lastStreetComputed: 'preflop',
-  // A minimal preflop context (set in Phase 1 code after runPreflopUpToHero())
-  preflop: { openerSeat: null, threeBetterSeat: null }
+    survivors: new Set(),
+    survivorsByStreet: { flop: [], turn: [], river: [] },
+    lastStreetComputed: 'preflop',
+    preflop: { openerSeat: null, threeBetterSeat: null, participants: [] },
+
+    // track statuses: "in", "folded_now", "folded_prev"
+    statusBySeat: {
+        UTG: 'in',
+        HJ: 'in',
+        CO: 'in',
+        BTN: 'in',
+        SB: 'in',
+        BB: 'in'
+    }
 };
 
 // Convenience lookup for a villain seat's actual cards
@@ -790,26 +810,56 @@ function engineContinueOnStreet(seat, board){
 
 // Recompute survivors at beginning of each street
 function engineRecomputeSurvivorsForStreet(board){
-  const street = (board.length===3) ? 'flop' : (board.length===4 ? 'turn' : (board.length===5 ? 'river' : 'preflop'));
+  const street = (board.length===3) ? 'flop'
+               : (board.length===4) ? 'turn'
+               : (board.length===5) ? 'river'
+               : 'preflop';
   if (street === 'preflop') { ENGINE.survivors.clear(); ENGINE.lastStreetComputed = 'preflop'; return; }
 
   const prev = new Set(ENGINE.survivors);
-if (street === 'flop'){
-  ENGINE.survivors.clear();
-  if (ENGINE.preflop.openerSeat) ENGINE.survivors.add(ENGINE.preflop.openerSeat);
-  if (ENGINE.preflop.threeBetterSeat) ENGINE.survivors.add(ENGINE.preflop.threeBetterSeat);
-  (ENGINE.preflop.coldCallers || []).forEach(seat => ENGINE.survivors.add(seat));
-  // Filter by deterministic continue rule
-  ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
-}  
-else if (street === 'turn'){
+
+  if (street === 'flop'){
+    ENGINE.survivors.clear();
+    if (ENGINE.preflop.openerSeat) ENGINE.survivors.add(ENGINE.preflop.openerSeat);
+    if (ENGINE.preflop.threeBetterSeat) ENGINE.survivors.add(ENGINE.preflop.threeBetterSeat);
+    (ENGINE.preflop.coldCallers ?? []).forEach(seat => ENGINE.survivors.add(seat));
+
+    // Deterministic filter
+    ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
+
+    // Soft guarantee: keep exactly one preflop participant if all pruned
+    if (ENGINE.survivors.size === 0) {
+      const pool = new Set();
+      if (ENGINE.preflop.openerSeat) pool.add(ENGINE.preflop.openerSeat);
+      if (ENGINE.preflop.threeBetterSeat) pool.add(ENGINE.preflop.threeBetterSeat);
+      (ENGINE.preflop.coldCallers ?? []).forEach(s => pool.add(s));
+      const order = ["BTN","CO","HJ","UTG","SB","BB"];
+      let pick = order.find(s => pool.has(s));
+      if (!pick && pool.size > 0) pick = [...pool][0];
+      if (pick) ENGINE.survivors.add(pick);
+    }
+  } else if (street === 'turn') {
     // Re-evaluate currently alive villains
     ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
-  } else if (street === 'river'){
-    // Everyone still alive goes to showdown (no filtering)
-    // keep ENGINE.survivors as-is
+  } else if (street === 'river') {
+    // Keep survivors as-is
   }
+
   ENGINE.survivorsByStreet[street] = [...ENGINE.survivors];
+
+  // Update status flags for discs
+  if (board.length >= 3) {
+    const allSeats = ["UTG","HJ","CO","BTN","SB","BB"];
+    const alive = ENGINE.survivors;
+    allSeats.forEach(seat => {
+      if (alive.has(seat)) {
+        ENGINE.statusBySeat[seat] = "in";
+      } else {
+        ENGINE.statusBySeat[seat] = (ENGINE.statusBySeat[seat] === "in") ? "folded_now" : "folded_prev";
+      }
+    });
+  }
+
   ENGINE.lastStreetComputed = street;
 }
 
@@ -964,11 +1014,11 @@ function computeEquityStatsLegacy(hole, board){
 // - If no survivors are present, falls back to legacy (or injects 1 villain) to keep UI stable.
 function computeEquityStats(hole, board){
   try{
-    const oppHands = engineCurrentOpponents(board); // fixed villain hands this street
-    if (!oppHands || oppHands.length===0){
-      // If absolutely nobody survived, keep charts functional with 1 opponent fallback
-      return computeEquityStatsLegacy(hole, board);
-    }
+  const oppHands = engineCurrentOpponents(board); // fixed villain hands this street
+if (!Array.isArray(oppHands) || oppHands.length < 1) {
+  // Fallback: random opponents, so training remains meaningful
+  return computeEquityStatsLegacy(hole, board);
+}
     const stage = stageFromBoard(board);  // you already have this helper
     const trials = SETTINGS.trialsByStage[stage] ?? 4000;
 
@@ -2383,6 +2433,170 @@ function classifyTransition(prevBoard, newBoard, hole){
   return { goodForPFR, badForPFR, gotMonotone, nowFourToStraight, boardPairedUp, overcardCame };
 }
 
+// --- Classify villain hand into a simple bucket for action heuristics
+function villainStrengthBucket(hole, board){
+  const score = evaluate7(hole, board);
+  const all = [...hole, ...board];
+  const { openEnder, gutshot } = detectStraightDrawFromAllCards(all);
+  const tex = analyzeBoard(board, hole);
+
+  if (score.cat >= 2) return "strong";             // 2P+ immediate value
+  if (score.cat === 1) return "medium";            // one pair
+  if (tex.heroFlushDraw || openEnder) return "draw";
+  if (gutshot) return "weak_draw";
+  return "weak";
+}
+
+// --- Pick a villain bet size (as % pot) from guide, with a little jitter
+function pickVillainSizePct(stage, board, hole){
+  const catKey = mapBoardToCategory(board, hole);
+  const g = CBET_GUIDE[catKey];
+  let sizes = g?.sizes ?? [33,50];
+
+  // river tends to polarise: allow upshift if g.sizes are small
+  if (stage === 'river' && Math.max(...sizes) < 66) sizes = [...sizes, 66];
+
+  let pct = sizes[Math.floor(Math.random()*sizes.length)];
+  const j = VILLAIN.sizeJitter;
+  const jitter = pct * ((Math.random()*2*j) - j);
+  let out = Math.round(pct + jitter);
+  out = Math.max(20, Math.min(200, out));
+  return out;
+}
+
+// --- Probability that a seat bets, given role/frequency and strength
+function villainBetProbability(seat, isPFR, stage, board, hole){
+  const catKey = mapBoardToCategory(board, hole);
+  const g = CBET_GUIDE[catKey];
+  let base = isPFR ? (VILLAIN.betFreq[g?.freq ?? "Med"] ?? 0.45)
+                   : (VILLAIN.probeFreq[g?.freq ?? "Med"] ?? 0.40);
+
+  const strength = villainStrengthBucket(hole, board);
+  if (strength === "strong") base += 0.25;
+  else if (strength === "draw") base += 0.15;
+  else if (strength === "weak") base -= 0.15;
+
+  // River: push aggression a tad when strong/draws are realised
+  if (stage === 'river' && (strength === "strong")) base += 0.10;
+
+  return Math.max(0.05, Math.min(0.95, base));
+}
+
+function postflopVillainActionsUpToHero(stage){
+  const heroSeat = currentPosition();
+  STREET_CTX.stage = stage;
+  STREET_CTX.potAtStart = pot;
+  STREET_CTX.openBettor = null;
+  STREET_CTX.openSizePct = null;
+
+  // Build acting sequence from SB up to (but not including) hero
+  const seq = [];
+  for (const seat of POSTFLOP_ORDER){
+    if (seat === heroSeat) break;
+    seq.push(seat);
+  }
+
+  // Early exit if nobody before hero
+  if (seq.length === 0) return;
+
+  // Walk through seats before hero
+  let pendingToCall = 0;
+  let betOwner = null;
+
+  for (const seat of seq){
+    // Must be an alive villain to act
+   // Must be an alive villain to act
+const state = ENGINE.statusBySeat[seat];
+if (state !== "in") continue;
+
+    const hole = seatHand(seat);
+    if (!hole) continue; // safety
+
+    const isPFR = (ENGINE.preflop.openerSeat === seat);
+
+    // If there is no live bet yet, seat may bet
+    if (pendingToCall === 0){
+      const p = villainBetProbability(seat, isPFR, stage, boardCards, holeCards);
+      if (Math.random() < p){
+        // Choose size vs current pot
+        const pct = pickVillainSizePct(stage, boardCards, holeCards);
+        const amt = Math.max(5, toStep5((pct/100) * pot));
+
+        pendingToCall = amt;
+        betOwner = seat;
+
+        // Record scenario label for UI
+        scenario = { label: `${seat} bets ${pct}%`, potFactor: 0 };
+        STREET_CTX.openBettor = seat;
+        STREET_CTX.openSizePct = pct;
+
+        // keep looping: later seats before hero may raise/fold/call
+        continue;
+      } else {
+        // They check; nothing to do
+        continue;
+      }
+    } else {
+      // There is a live bet; this seat decides to fold/call/raise
+      const strength = villainStrengthBucket(hole, boardCards);
+
+      // Rare raise
+      const willRaise = Math.random() < VILLAIN.raiseOverBetFreq && (strength === 'strong' || strength === 'draw');
+      if (willRaise){
+        // Make a bigger size over pot (raise-to, not increment); prefer 75%+ on turns/rivers
+        const pct = Math.max(66, pickVillainSizePct(stage, boardCards, holeCards));
+        const raiseTo = Math.max(pendingToCall * 2, toStep5((pct/100) * pot)); // "to call" for hero will become this
+        pendingToCall = raiseTo;
+        scenario = { label: `${seat} raises to ${pct}%`, potFactor: 0 };
+        betOwner = seat; // latest aggressor
+        continue;
+      }
+
+      // Decide to fold if weak vs price; else call (we don't add to pot yet)
+      if (strength === 'weak' || strength === 'weak_draw'){
+        if (Math.random() < VILLAIN.foldFracFacingBetWeak){
+          ENGINE.statusBySeat[seat] = "folded_now";
+          continue;
+        }
+      }
+      // Call (no pot add yet; hero still faces the same price)
+      // (If you'd like to reflect callers in the UI, you can stash them in STREET_CTX.)
+      continue;
+    }
+ }
+
+// Present price to hero
+toCall = toStep5(pendingToCall);
+updatePotInfo(); // refresh KPI chips
+
+// If nobody bet before hero, set a friendly scenario label
+if (toCall <= 0) {
+  scenario = { label: "Checks to you" };
+} 
+}
+
+function settleVillainsAfterHero(stage, heroAction){
+  // Only simulate extra callers when hero made an aggressive action without a live bet
+  if (!(heroAction === 'bet' || heroAction === 'raise')) return;
+
+  // If hero 'bet' (no live bet), estimate hero's bet size from pot at start of street
+  if (heroAction === 'bet' && (heroActions[stage]?.sizePct != null)) {
+    const pct = Number(heroActions[stage].sizePct) || 0;
+    const betAmt = Math.max(5, toStep5((pct/100) * STREET_CTX.potAtStart));
+
+    // Estimate how many villains continue behind: use currently 'in' seats excluding hero
+    const aliveSeats = POSTFLOP_ORDER.filter(s => s !== currentPosition() && ENGINE.statusBySeat[s] === 'in');
+    const callers = Math.round(aliveSeats.length * VILLAIN.callFracAfterHeroBet);
+
+    // Add their calls to pot (hero's bet was already added in applyHeroContribution)
+    const added = callers * betAmt;
+    if (added > 0){
+      pot = toStep5(pot + added);
+      updatePotInfo();
+    }
+  }
+}
+
 function evaluateBarrel(stage, prevBoard, currBoard, isHeroPFR, pos, prevAggressive, action, sizePct){
   if (!isHeroPFR) return { barrelEval:'Not PFR', sizeEval:'n/a', note:'You are not PFR — default is to be selective with stabs.' };
 
@@ -2547,9 +2761,22 @@ async function startNewHand(){
   hintsEl.textContent = "";
   inputForm.reset();
   handHistory = [];
-
-  // Clear KPI equity swing chip at the start of a new hand
   updateKpiEquitySwing(0, null);
+
+// --- RESET ALL STATUS FLAGS FOR NEW HAND ---
+Object.keys(ENGINE.statusBySeat).forEach(seat => {
+    ENGINE.statusBySeat[seat] = "in";
+});
+
+// Reset engine survivors
+ENGINE.survivors.clear();
+ENGINE.survivorsByStreet = { flop: [], turn: [], river: [] };
+ENGINE.lastStreetComputed = 'preflop';
+
+// Reset preflop metadata
+ENGINE.preflop.openerSeat = null;
+ENGINE.preflop.threeBetterSeat = null;
+ENGINE.preflop.participants = [];
 
   submitStageBtn.classList.remove("hidden");
   nextStageBtn.classList.add("hidden");
@@ -2594,13 +2821,36 @@ engineSetPreflopContext(pf.openerSeat, pf.threeBetterSeat, pf.coldCallers);
   renderCards();
   setPositionDisc();
   setPreflopBadge();
+  renderPositionStatusRow();
   updatePotInfo();
   updateHintsImmediate();
   maybeStartTimer();
 }
 
+function showWalkMessage() {
+    if (!feedbackEl) return;
+
+    // Clear any prior feedback for clarity
+    // (If you prefer to keep previous lines, remove the next line)
+    feedbackEl.innerHTML = "";
+
+    // Insert the message line
+    feedbackEl.insertAdjacentHTML('beforeend', `
+        <div class="walk-banner" role="status" aria-live="polite">
+            <strong>Everyone folds preflop — you win the pot.</strong>
+        </div>
+    `);
+}
+
 function advanceStage(){
   currentStageIndex++;
+
+// degrade folded_now → folded_prev when a new street begins
+Object.keys(ENGINE.statusBySeat).forEach(seat => {
+    if (ENGINE.statusBySeat[seat] === "folded_now") {
+        ENGINE.statusBySeat[seat] = "folded_prev";
+    }
+});
   feedbackEl.innerHTML = "";
   inputForm.reset();
   hintsEl.textContent = "";
@@ -2626,7 +2876,42 @@ function advanceStage(){
 
   // Recompute survivors for this street (villain fold/continue is deterministic)
   try { engineRecomputeSurvivorsForStreet(boardCards); } catch(e){}
+
+// --- If no villain remains in play, end the hand immediately
+{
+  const hero = currentPosition();
+  const anyVillainIn = ["UTG","HJ","CO","BTN","SB","BB"]
+    .some(s => s !== hero && ENGINE.statusBySeat[s] === "in");
+  if (!anyVillainIn) {
+    renderPositionStatusRow();
+    showWalkMessage(); // already in your file
+    endHand();
+    return;
+  }
+}
+
+
+// ---------- Preflop Walk Detection AFTER survivor recompute ----------
+if (STAGES[currentStageIndex] === "flop") {
+  const hero = currentPosition();
+  const alive = ENGINE.survivors; // Set of seats
+  const noVillainsAlive = [...alive].every(seat => seat === hero); // true if empty or only hero
+  if (preflopAggressor === "hero" && noVillainsAlive) {
+    Object.keys(ENGINE.statusBySeat).forEach(seat => {
+      if (seat !== hero) ENGINE.statusBySeat[seat] = "folded_prev";
+    });
+    showWalkMessage();
+    renderPositionStatusRow();
+    endHand();
+    return;
+  }
+}
  
+// === Villain actions up to hero (makes a live price and scenario label)
+STREET_CTX.stage = stage;
+STREET_CTX.potAtStart = pot;
+postflopVillainActionsUpToHero(stage);
+
   // --- Compute new equity and evaluate swing (with transition reasons) ---
   let newEquity = null, delta = null;
   try {
@@ -2661,9 +2946,66 @@ function advanceStage(){
   }
 
   renderCards();
+  renderPositionStatusRow();
   updatePotInfo();
   updateHintsImmediate();
   maybeStartTimer();
+}
+
+function renderPositionStatusRow() {
+  const row = document.getElementById("positionStatusRow");
+  if (!row) return;
+
+  const heroSeat = currentPosition();
+  const pfrSeat = ENGINE.preflop.openerSeat || null;  // show PFR for hero or villain
+
+  const seats = ["UTG","HJ","CO","BTN","SB","BB"];
+  row.innerHTML = "";
+
+  seats.forEach(seat => {
+    // vertical stack: disc on top, badge below
+    const stack = document.createElement("div");
+    stack.className = "pos-seat-stack";
+
+    // Disc
+    const disc = document.createElement("div");
+    if (seat === heroSeat) {
+      disc.className = "pos-disc-villain pos-status-hero";
+    } else {
+      disc.className = "pos-disc-villain";
+      const state = ENGINE.statusBySeat[seat];
+      if (state === "in") disc.classList.add("pos-status-in");
+      else if (state === "folded_now") disc.classList.add("pos-status-folded-now");
+      else disc.classList.add("pos-status-folded-prev");
+    }
+    disc.textContent = seat;
+    stack.appendChild(disc);
+
+    // Blue PFR pill BELOW the disc (villain OR hero)
+if (seat === pfrSeat) {
+  const badge = document.createElement("div");
+  badge.className = "pos-badge-pfr";
+  badge.textContent = "PFR";
+
+  // Accessible tooltip: visible on hover/focus, and native title for touch
+  const tip = (seat === heroSeat)
+    ? "Pre-flop raiser (Hero)"
+    : `Pre-flop raiser (${seat})`;
+
+  // Custom CSS tooltip
+  badge.setAttribute("data-tip", tip);
+
+  // Native tooltip + accessibility
+  badge.setAttribute("title", tip);
+  badge.setAttribute("role", "img");
+  badge.setAttribute("aria-label", tip);
+  badge.setAttribute("tabindex", "0"); // allow keyboard focus to reveal tooltip
+
+  stack.appendChild(badge);
+}
+
+    row.appendChild(stack);
+  });
 }
 
 function endHand(){
@@ -2672,35 +3014,64 @@ function endHand(){
   // Clear KPI swing chip at hand end
   updateKpiEquitySwing(0, null);
 
-// Villain reveal (Always / Showdown-only / On hero fold)
-try{
-  const reveal = (REVEAL?.policy ?? 'showdown_only');
-  const heroFolded = handHistory.some(h => (h.stage==='preflop' || h.stage==='flop' || h.stage==='turn' || h.stage==='river') && h.decision==='fold');
+// Villain reveal (Always remaining / Always all / Showdown-only / On hero fold)
+try {
+  const reveal = (REVEAL?.policy ?? 'always_remaining');
+
+  const heroFolded = handHistory.some(h =>
+    (h.stage === 'preflop' || h.stage === 'flop' || h.stage === 'turn' || h.stage === 'river')
+    && h.decision === 'fold'
+  );
   const reachedRiver = (boardCards.length === 5);
 
   let shouldReveal = false;
-  if (reveal === 'always_all') shouldReveal = true;
+  if (reveal === 'always_remaining') shouldReveal = true;
+  else if (reveal === 'always_all') shouldReveal = true;
   else if (reveal === 'showdown_only') shouldReveal = reachedRiver;
   else if (reveal === 'on_hero_fold') shouldReveal = heroFolded;
 
-  if (shouldReveal){
-   let who = ENGINE.survivorsByStreet.river.length ? ENGINE.survivorsByStreet.river
-        : (ENGINE.survivorsByStreet.turn.length ? ENGINE.survivorsByStreet.turn
-        : ENGINE.survivorsByStreet.flop);
+  if (shouldReveal) {
+    let who = [];
 
-// If the hand ended before a board (preflop fold) or no survivors remained,
-// fall back to preflop participants so we can reveal something.
-if (!who || !who.length) {
-  const preParts = ENGINE.preflop?.participants || [];
-  who = preParts.length ? preParts : [];
-}
-    if (who && who.length){
-      const lines = who.map(seat => `${seat}: ${describeVillainHand(seatHand(seat))}`).join(' · ');
-      feedbackEl.insertAdjacentHTML('beforeend', `<div style="margin-top:8px"><strong>Villain reveal:</strong> ${lines}</div>`);
+    if (reveal === 'always_remaining') {
+      const heroSeat = currentPosition();
+      const allSeats = ["UTG","HJ","CO","BTN","SB","BB"];
+      // show only villains still "in" at hand end
+      who = allSeats.filter(seat => seat !== heroSeat && ENGINE.statusBySeat[seat] === "in");
+    } else if (reveal === 'always_all') {
+      // show all villains regardless of status
+      who = TABLE.seats.filter(s => s.role === 'villain').map(s => s.seat);
+    } else {
+      // showdown_only / on_hero_fold → use survivorsByStreet fallback chain
+      who = ENGINE.survivorsByStreet.river.length ? ENGINE.survivorsByStreet.river
+          : (ENGINE.survivorsByStreet.turn.length ? ENGINE.survivorsByStreet.turn
+          : ENGINE.survivorsByStreet.flop);
+    }
+
+    // Safety for 'always_remaining': if list ended empty, recompute from 'in' flags
+    if ((!who || !who.length) && reveal === 'always_remaining') {
+      const heroSeat = currentPosition();
+      const allSeats = ["UTG","HJ","CO","BTN","SB","BB"];
+      who = allSeats.filter(seat => seat !== heroSeat && ENGINE.statusBySeat[seat] === "in");
+    }
+
+    if (who && who.length) {
+      const lines = who
+        .map(seat => `${seat}: ${describeVillainHand(seatHand(seat))}`)
+        .join(' · ');
+      feedbackEl.insertAdjacentHTML(
+        'beforeend',
+        `<div style="margin-top:8px"><strong>Villain reveal:</strong> ${lines}</div>`
+      );
     }
   }
-}catch(e){}
+} catch (e) {
+  // Keep endHand() resilient even if something above throws
+  // console.warn('Reveal block error:', e);
+}
 
+
+  renderPositionStatusRow();
   showSummary();
   sessionHistory.push(...handHistory);
   saveSessionHistory();
@@ -2818,6 +3189,13 @@ inputForm.addEventListener("submit", (e)=>{
 // Pot accumulation using progressive + hero contributions (always £5-rounded)
  applyHeroContribution(decision);
    if (decision === 'fold') return; // endHand() may have been called
+
+// === Settle some field callers when hero bets, so pot grows realistically
+const actionLabel = determinePostflopAction(decision, toCall); // you already use this elsewhere
+const stageNow = STAGES[currentStageIndex];
+if (stageNow === 'flop' || stageNow === 'turn' || stageNow === 'river') {
+  settleVillainsAfterHero(stageNow, actionLabel);
+}
 
   // ===== Phase 1: Preflop coaching & data
   try{
@@ -3215,7 +3593,7 @@ function downloadCsv(){
 
 // Villain reveal policy state
 const REVEAL = {
-  policy: 'showdown_only' // 'always_all' | 'showdown_only' | 'on_hero_fold'
+  policy: 'always_remaining' // 'always_all' | 'showdown_only' | 'on_hero_fold' | 'always_remaining'
 };
 
 function createSettingsPanel(){
@@ -3276,9 +3654,10 @@ function createSettingsPanel(){
 <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
 <label>Villain reveal</label>
 <select id="set_reveal_policy">
+  <option value="always_remaining" selected>Always show remaining villains</option>
   <option value="always_all">Always show all</option>
-  <option value="showdown_only" selected>Show only at showdown</option>
-  <option value="on_hero_fold">Show remaining villains when hero folds</option>
+  <option value="showdown_only">Show only at showdown</option>
+  <option value="on_hero_fold">Show when hero folds</option>
 </select>
 
       <!-- NEW: Blind editor -->
@@ -3341,7 +3720,7 @@ function createSettingsPanel(){
 
 // Save villain reveal policy
 const rp = panel.querySelector('#set_reveal_policy');
-if (rp) REVEAL.policy = rp.value || 'showdown_only';
+if (rp) REVEAL.policy = rp.value || 'always_remaining';
 
     // NEW: apply blinds (always £5-rounded)
     const newSB = toStep5(parseFloat(panel.querySelector("#set_sb").value) || BLINDS.sb);
