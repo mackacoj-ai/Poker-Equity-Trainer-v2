@@ -871,6 +871,27 @@ function engineCurrentOpponents(board){
   return hands;
 }
 
+// Count how many opponents are still "in" without using their cards
+function countOpponentsInPlay(board){
+  try{
+    const hero = currentPosition();
+    const street = stageFromBoard(board);               // you already have this helper
+    if (street === 'preflop'){
+      // Use preflop participants if available; else fall back to baseline
+      const parts = ENGINE.preflop?.participants ?? []; // e.g., opener, 3-bettor, cold callers
+      const n = parts.filter(s => s !== hero).length;
+      return (n > 0) ? n : SETTINGS.sim.playersBaseline;
+    }
+    // Flop/turn/river – keep survivors up to date, then count them (excluding hero)
+    if (street !== ENGINE.lastStreetComputed) engineRecomputeSurvivorsForStreet(board);
+    const n = [...ENGINE.survivors].filter(s => s !== hero).length;
+    return Math.max(0, n);
+  } catch(e){
+    // Safe fallback
+    return SETTINGS.sim.playersBaseline;
+  }
+}
+
 // Small hook from Phase 1 to remember opener / 3-bettor
 function engineSetPreflopContext(openerSeat, threeBetterSeat, coldCallers){
   ENGINE.preflop.openerSeat = openerSeat || null;
@@ -963,10 +984,13 @@ function sampleShowdownOpponents(baselineCount, board, maybeOppHands, maybeDeck)
   }
   return survivors;
 }
-function computeEquityStatsLegacy(hole, board){
+
+function computeEquityStatsLegacy(hole, board, numOppOverride = null){
   const stage = stageFromBoard(board);
   const trials = SETTINGS.trialsByStage[stage] ?? 4000;
-  const BASE_OPP = SETTINGS.sim.playersBaseline;
+
+  // Use override if provided, otherwise fall back to baseline
+  const BASE_OPP = (numOppOverride != null ? Math.max(0, numOppOverride) : SETTINGS.sim.playersBaseline);
 
   let wins=0, ties=0, losses=0; let equityAcc=0;
   const catCount = new Map();
@@ -1009,62 +1033,26 @@ function computeEquityStatsLegacy(hole, board){
   return { equity, winPct, tiePct, losePct, trials, catBreakdown, numOpp: Math.max(1, SETTINGS.sim.playersBaseline) };
 }
 
-// Survivor-aware MC using the actual villain hands from the engine.
-// - Opponent hole cards are FIXED (from Phase 1), only runouts are sampled.
-// - If no survivors are present, falls back to legacy (or injects 1 villain) to keep UI stable.
+// TRAINING MODE: always compute equity vs random opponents,
+// but size the field to match how many players are still in.
+// We DO NOT look at (or remove) villains' actual hole cards here.
 function computeEquityStats(hole, board){
-  try{
-  const oppHands = engineCurrentOpponents(board); // fixed villain hands this street
-if (!Array.isArray(oppHands) || oppHands.length < 1) {
-  // Fallback: random opponents, so training remains meaningful
-  return computeEquityStatsLegacy(hole, board);
-}
-    const stage = stageFromBoard(board);  // you already have this helper
-    const trials = SETTINGS.trialsByStage[stage] ?? 4000;
-
-    let wins=0, ties=0, losses=0; let equityAcc=0;
-    const catCount = new Map();
-
-    for (let t=0; t<trials; t++){
-      // Build runout deck without hero/villain cards & current board
-      const simDeck = createDeck().filter(c => 
-        !containsCard(hole,c) && !containsCard(board,c) &&
-        oppHands.every(h=>!containsCard(h,c))
-      );
-      // Sample the remaining board (runout only)
-      const need = 5 - board.length;
-      const simBoard = [...board];
-      for (let i=0;i<need;i++) simBoard.push(popRandomCard(simDeck));
-
-      const heroScore = evaluate7(hole, simBoard);
-      let better=0, equal=0;
-      for (let i=0;i<oppHands.length;i++){
-        const villainScore = evaluate7(oppHands[i], simBoard);
-        const cmp = compareScores(heroScore, villainScore);
-        if (cmp<0) better++;
-        else if (cmp===0) equal++;
-      }
-      if (better>0) losses++;
-      else if (equal>0){ ties++; equityAcc += 1/(equal+1); }
-      else { wins++; equityAcc += 1; }
-
-      const cat = CAT_NAME[heroScore.cat];
-      catCount.set(cat, (catCount.get(cat)??0)+1);
-    }
-
-    const winPct = (wins/trials)*100, tiePct=(ties/trials)*100, losePct=(losses/trials)*100;
-    const equity = (equityAcc/trials)*100;
-    const catBreakdown=[];
-    for (const [k,v] of catCount.entries()) catBreakdown.push({ name:k, pct:(v/trials)*100 });
-    const catOrder = ['Straight Flush','Four of a Kind','Full House','Flush','Straight','Three of a Kind','Two Pair','One Pair','High Card'];
-    catBreakdown.sort((a,b)=>{ const oi=catOrder.indexOf(a.name)-catOrder.indexOf(b.name); return oi!==0?oi:(b.pct-a.pct); });
-
-    return { equity, winPct, tiePct, losePct, trials, catBreakdown, numOpp: Math.max(1, oppHands.length) };
-  }catch(e){
-    console.warn('[engine-mc] survivor MC failed, using legacy', e);
-    return computeEquityStatsLegacy(hole, board);
+  let numOpp = countOpponentsInPlay(board);  // from engine/discs, not hole cards
+  if (numOpp === 0) {
+    // For training, keep at least 1 opponent so equities remain meaningful pre-showdown
+    numOpp = 1;
   }
+  return computeEquityStatsLegacy(hole, board, numOpp);
 }
+
+// ==================== Scoring & decisions ====================
+function bandForError(error){
+  const absErr=Math.abs(error);
+  if (absErr<=5) return "green";
+  if (absErr<=12) return "amber";
+  return "red";
+}
+
 
 // ==================== Scoring & decisions ====================
 function bandForError(error){
