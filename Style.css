@@ -592,6 +592,22 @@ body.compact-auto .primary{ padding:9px 14px; }
   opacity: 1;
 }
 
+.player-letter-chip{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:22px; height:22px;
+  margin:0 auto 4px;
+  border-radius:12px;
+  background:#2b3d55;
+  color:#e5eef8; font-weight:700; font-size:12px;
+  border:1px solid #3a4c68;
+  cursor:pointer; user-select:none;
+}
+.player-letter-chip:focus { outline:2px solid #5ba6ff; outline-offset:2px; }
+
+.player-letter-chip.hero { background:#3a285d; border-color:#5a3f82; }
+
 /* =========================================================
    Stability override (kept small) — ensures preflop heatmap
    colours win even if another stylesheet sets .cell bkg.
