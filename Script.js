@@ -14,6 +14,236 @@ let difficulty = "beginner";
 let handHistory = [];
 let sessionHistory = [];
 
+// ==================== Personalities (session-level) ====================
+// Hero is never assigned a sampled personality.
+const HERO_LETTER = "H";
+const VILLAIN_LETTERS = ["A","B","C","D","E"];      // 5 villains in 6-max
+let VILLAIN_LETTERS_RING = null;                    // rotates around seats hand-to-hand
+
+// Frequencies from your doc: TAG≈40, LAG≈15, STATION≈20, NIT≈15, MANIAC≈3 (normalized)
+const PERSONALITY_WEIGHTS = { TAG: 40, LAG: 15, STATION: 20, NIT: 15, MANIAC: 3 }; // doc guidance
+const PERSONALITY_INFO = {
+  TAG:     { label: "TAG — Tight‑Aggressive",    how: "Plays selective ranges, applies pressure; folds when dominated.",  spot: "Small frequent c-bets on A‑high rainbow; disciplined turn barrels." },
+  LAG:     { label: "LAG — Loose‑Aggressive",    how: "Wider opens/defends; higher aggression across streets.",          spot: "Expect stabs & double‑barrels; call wider vs large bluffs; 4‑bet selectively." },
+  STATION: { label: "Loose‑Passive (Station)",    how: "Too many calls; rarely bluffs or raises.",                        spot: "Value‑bet thinner; avoid big multi‑street bluffs." },
+  NIT:     { label: "Nit / Rock",                 how: "Very tight; folds too much; strong when continuing.",            spot: "Steal often; give credit when they show strength." },
+  MANIAC:  { label: "Maniac",                     how: "Very high VPIP & aggression; over‑bluffs.",                      spot: "Trap pre; induce; call down with good bluff‑catchers; avoid thin bluffs." }
+};
+
+// Session-scoped state
+let SESSION_PERSONA_BY_LETTER = null;  // e.g., { A:'TAG', B:'STATION', ... } (villains only)
+let LETTERS_BY_POSITION = null;        // e.g., { UTG:'A', HJ:'H', CO:'C', BTN:'E', SB:'B', BB:'D' }
+
+// ---- helpers ----
+function normalizeWeights(obj){
+  const total = Object.values(obj).reduce((a,b)=>a+b,0) || 1;
+  return Object.fromEntries(Object.entries(obj).map(([k,v]) => [k, v/total]));
+}
+function weightedPick(weightMap){
+  const r = Math.random(); let acc=0;
+  for (const [k,p] of Object.entries(weightMap)) { acc += p; if (r <= acc) return k; }
+  return Object.keys(weightMap).slice(-1)[0];
+}
+
+// Sample personalities for villains only (A–E), with 0–1 maniac table control (~30% chance).
+function sampleVillainPersonalities(){
+  const p = normalizeWeights(PERSONALITY_WEIGHTS);
+  const personaByLetter = {};
+  let poolLetters = VILLAIN_LETTERS.slice();
+
+  // 0–1 maniac control (≈30% tables have exactly one)
+  const hasManiac = Math.random() < 0.30;
+  if (hasManiac) {
+    const i = Math.floor(Math.random()*poolLetters.length);
+    personaByLetter[poolLetters[i]] = 'MANIAC';
+    poolLetters.splice(i,1);
+  }
+  const nonManiacWeights = normalizeWeights({ TAG:p.TAG, LAG:p.LAG, STATION:p.STATION, NIT:p.NIT });
+  for (const L of poolLetters) personaByLetter[L] = weightedPick(nonManiacWeights);
+  return personaByLetter; // only villains get entries
+}
+
+// First load per browser session
+function initSessionPersonalities(){
+  const savedRaw = sessionStorage.getItem('trainer_personas_v1');
+
+  if (savedRaw){
+    const saved = JSON.parse(savedRaw) || {};
+    SESSION_PERSONA_BY_LETTER = saved.personaByLetter || null;
+    LETTERS_BY_POSITION       = saved.lettersByPosition || null;
+    VILLAIN_LETTERS_RING      = saved.villainRing || null;
+
+    // MIGRATION: if no ring saved (older sessions), reconstruct or reseed it
+    if (!Array.isArray(VILLAIN_LETTERS_RING) || VILLAIN_LETTERS_RING.length !== 5) {
+      const order = ["UTG","HJ","CO","BTN","SB","BB"];
+      const maybe = order
+        .map(pos => LETTERS_BY_POSITION?.[pos])
+        .filter(L => L && L !== HERO_LETTER);
+
+      VILLAIN_LETTERS_RING = (maybe.length === 5)
+        ? maybe
+        : VILLAIN_LETTERS.slice().sort(() => Math.random() - 0.5);
+
+      sessionStorage.setItem('trainer_personas_v1', JSON.stringify({
+        personaByLetter: SESSION_PERSONA_BY_LETTER,
+        villainRing: VILLAIN_LETTERS_RING,
+        lettersByPosition: LETTERS_BY_POSITION
+      }));
+    }
+  } else {
+    // First-time this session
+    SESSION_PERSONA_BY_LETTER = sampleVillainPersonalities();
+    VILLAIN_LETTERS_RING = VILLAIN_LETTERS.slice().sort(() => Math.random() - 0.5);
+    LETTERS_BY_POSITION = { UTG:"A", HJ:"B", CO:"C", BTN:"D", SB:"E", BB:HERO_LETTER };
+    sessionStorage.setItem('trainer_personas_v1', JSON.stringify({
+      personaByLetter: SESSION_PERSONA_BY_LETTER,
+      villainRing: VILLAIN_LETTERS_RING,
+      lettersByPosition: LETTERS_BY_POSITION
+    }));
+  }
+}
+
+// ==================== Hero metrics & classification ====================
+let HERO_STATS = {
+  hands:0,
+  vpip:0,   // voluntarily put $ in preflop (call/raise)
+  pfr:0,    // raised preflop first-in
+  threeBet:0,
+  flopCbetOpp:0, flopCbet:0,
+  bet:0, raise:0, call:0,
+  sawFlop:0, sawTurn:0, sawRiver:0, showdown:0, folded:0
+};
+
+// Call each new hand
+function heroNewHand(){ HERO_STATS.hands++; }
+
+// Mark street reached (call when a new street is dealt)
+function markStreetReached(stage){
+  if (stage==='flop') HERO_STATS.sawFlop++;
+  if (stage==='turn') HERO_STATS.sawTurn++;
+  if (stage==='river') HERO_STATS.sawRiver++;
+}
+
+// Preflop update: decision + price context
+function updateHeroPreflop(decision, toCall){
+  // VPIP if hero voluntarily calls or raises
+  if (decision === 'call' || decision === 'raise') HERO_STATS.vpip++;
+
+  // If hero raises with no price to call → PFR; if raises facing a price → 3-bet
+  if (decision === 'raise') {
+    if (toCall > 0) HERO_STATS.threeBet++;
+    else HERO_STATS.pfr++;
+  }
+}
+
+// Postflop update: action label from determinePostflopAction(decision, toCall)
+function updateHeroPostflop(stage, actionLabel){
+  if (actionLabel === 'bet') HERO_STATS.bet++;
+  else if (actionLabel === 'raise') HERO_STATS.raise++;
+  else if (actionLabel === 'call') HERO_STATS.call++;
+
+  // Flop c-bet: only when hero was PFR preflop and chooses 'bet' on flop
+  if (stage === 'flop' && preflopAggressor === 'hero') {
+    HERO_STATS.flopCbetOpp++;
+    if (actionLabel === 'bet') HERO_STATS.flopCbet++;
+  }
+}
+
+// End-of-hand markers
+function markHeroShowdown(){ HERO_STATS.showdown++; }
+function markHeroFolded(){ HERO_STATS.folded++; }
+
+// Derive numbers safely
+function pct(n,d){ return (d>0) ? (100*n/d) : 0; }
+
+// Simple rules-of-thumb mapping → style bucket (Nit / TAG / LAG / Station / Maniac)
+function classifyHeroStyle(stats){
+  const vpip = pct(stats.vpip, stats.hands);
+  const pfr  = pct(stats.pfr,  stats.hands);
+  const threeBet = pct(stats.threeBet, stats.hands);
+  const postActs = (stats.bet + stats.raise + stats.call);
+  const af   = (stats.call > 0) ? ( (stats.bet + stats.raise) / stats.call ) : (stats.bet + stats.raise > 0 ? 3.0 : 0);
+  const cbet = pct(stats.flopCbet, stats.flopCbetOpp);
+
+  // Heuristics:
+  // Nit: very tight (low VPIP/PFR), passive (low AF)
+  if (vpip < 18 && pfr < 12 && af < 1.2)        return { key:'NIT',     label:'Nit / Rock' };
+
+  // TAG: moderate VPIP, healthy PFR, moderate AF
+  if (vpip >= 18 && vpip <= 26 && pfr >= 14 && pfr <= 22 && af >= 1.2 && af <= 2.5)
+                                                  return { key:'TAG',     label:'TAG — Tight‑Aggressive' };
+
+  // LAG: high VPIP & PFR, reasonably aggressive
+  if (vpip > 26 && pfr > 20 && af >= 2.0)         return { key:'LAG',     label:'LAG — Loose‑Aggressive' };
+
+  // Station: high VPIP but low aggression (calls a lot)
+  if (vpip > 28 && af < 1.0)                      return { key:'STATION', label:'Loose‑Passive (Station)' };
+
+  // Maniac: very high VPIP & PFR and very high AF
+  if (vpip > 35 && pfr > 28 && af > 3.0)          return { key:'MANIAC',  label:'Maniac' };
+
+  // Fallbacks
+  if (pfr < 10)                                   return { key:'NIT',     label:'Nit / Rock' };
+  if (af > 2.8 && vpip > 28)                      return { key:'LAG',     label:'LAG — Loose‑Aggressive' };
+  return { key:'TAG', label:'TAG — Tight‑Aggressive' };
+}
+
+// Popover for hero (H)
+function openHeroEvaluationPopover(){
+  const s = HERO_STATS;
+  const vpip = pct(s.vpip, s.hands).toFixed(1);
+  const pfr  = pct(s.pfr,  s.hands).toFixed(1);
+  const t3b  = pct(s.threeBet, s.hands).toFixed(1);
+  const af   = (s.call > 0) ? ((s.bet + s.raise) / s.call).toFixed(2) : ((s.bet + s.raise)>0 ? "3.00" : "0.00");
+  const cbet = pct(s.flopCbet, s.flopCbetOpp).toFixed(1);
+
+  const bucket = classifyHeroStyle(s); // { key, label }
+  const info = PERSONALITY_INFO[bucket.key] || { label: bucket.label, how:'', spot:'' };
+
+  const html = `
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div><strong>You (H) are currently playing like:</strong> ${info.label}</div>
+      <div><strong>How this style plays:</strong> ${info.how || '—'}</div>
+      <div><strong>Exploits / tells:</strong> ${info.spot || '—'}</div>
+      <hr/>
+      <div><strong>Your metrics (session):</strong></div>
+      <div>VPIP: <strong>${vpip}%</strong> · PFR: <strong>${pfr}%</strong> · 3‑bet: <strong>${t3b}%</strong></div>
+      <div>Aggression factor (bets+raises / calls): <strong>${af}</strong></div>
+      <div>Flop c‑bet (as PFR): <strong>${cbet}%</strong> (${s.flopCbet}/${s.flopCbetOpp} opp.)</div>
+      <div class="muted" style="opacity:.85">This is a heuristic classification that will refine as you play more hands.</div>
+    </div>
+  `;
+  personaModal.open("Your current style", html);
+}
+
+// Build mapping for this hand: put H on hero seat; rotate villain ring over other seats.
+function rotateLettersForNewHand(){
+  const order = ["UTG","HJ","CO","BTN","SB","BB"];
+  const heroSeat = currentPosition();
+
+  // Guard: ensure ring is a valid 5-letter array
+  if (!Array.isArray(VILLAIN_LETTERS_RING) || VILLAIN_LETTERS_RING.length !== VILLAIN_LETTERS.length) {
+    VILLAIN_LETTERS_RING = VILLAIN_LETTERS.slice();
+  }
+
+  // Rotate the ring (e.g., A,B,C,D,E -> E,A,B,C,D)
+  VILLAIN_LETTERS_RING.unshift(VILLAIN_LETTERS_RING.pop());
+
+  // Assign letters to seats (villains only); hero seat gets H
+  const out = {};
+  const villainSeats = order.filter(pos => pos !== heroSeat);
+  villainSeats.forEach((pos, idx) => { out[pos] = VILLAIN_LETTERS_RING[idx]; });
+  out[heroSeat] = HERO_LETTER;
+
+  LETTERS_BY_POSITION = out;
+
+  // Persist
+  const saved = JSON.parse(sessionStorage.getItem('trainer_personas_v1') || '{}');
+  saved.villainRing = VILLAIN_LETTERS_RING;
+  saved.lettersByPosition = LETTERS_BY_POSITION;
+  sessionStorage.setItem('trainer_personas_v1', JSON.stringify(saved));
+}
+
 // ====== Blinds & schedule (tournament-friendly) ======
 let BLINDS = { sb: 5, bb: 10 };   // always rounded via toStep5 on use
 const BLIND_SCHEDULE = [
@@ -680,8 +910,6 @@ const CAT_NAME = {
 const SETTINGS = {
   sim: {
     playersBaseline: 5,
-    continueRate: { flop: 0.65, turn: 0.55, river: 0.45 },
-    rangeAwareContinuation: true,
     minShowdownOpponents: 1
   },
   pot: {
@@ -910,6 +1138,23 @@ function engineSetPreflopContext(openerSeat, threeBetterSeat, coldCallers){
   ENGINE.lastStreetComputed = 'preflop';
 }
 
+// Mark only the preflop participants (plus hero) as "in" when we get to the flop
+function applyPreflopParticipantsToStatuses(){
+  try {
+    const hero = currentPosition();
+    const parts = new Set(ENGINE.preflop?.participants || []);
+    // If the hero reaches the flop, hero must be in
+    parts.add(hero);
+
+    ["UTG","HJ","CO","BTN","SB","BB"].forEach(seat => {
+      if (seat === hero) return; // hero handled above
+      ENGINE.statusBySeat[seat] = parts.has(seat) ? "in" : "folded_prev";
+    });
+  } catch(e) {
+    // Fail-safe: do nothing if anything unexpected happens
+  }
+}
+
 // Reveal helper for end-of-hand
 function describeVillainHand(h){
   if (!h || h.length<2) return '';
@@ -941,49 +1186,13 @@ function villainConnected(hole, boardAtStreet){
   }
   return pairWithBoard || hasFD || oesd;
 }
-function sampleShowdownOpponents(baselineCount, board, maybeOppHands, maybeDeck){
-  const stage = stageFromBoard(board);
-  const rates = SETTINGS.sim.continueRate;
-  const oppHands = maybeOppHands || [];
-  const d = maybeDeck;
 
-  function effectiveKeepProbFor(opIdx, street){
-    let p = rates[street];
-    if (SETTINGS.sim.rangeAwareContinuation && oppHands[opIdx] && d){
-      const boardAtStreet =
-        street==='flop' ? (board.length>=3 ? board.slice(0,3) : [d[0],d[1],d[2]]) :
-        street==='turn' ? (board.length>=4 ? board.slice(0,4) : (board.length===3 ? [...board, d[0]] : [])) :
-        street==='river' ? (board.length>=5 ? board.slice(0,5) : (board.length===4 ? [...board, d[0]] : [])) :
-        [];
-      if (boardAtStreet.length>=3){
-        const connected = villainConnected(oppHands[opIdx], boardAtStreet);
-        if (connected) p = Math.min(0.95, p+0.25);
-      }
-    }
-    return Math.max(0, Math.min(1, p));
-  }
-
-  const survivors = [];
-  for (let i=0;i<baselineCount;i++){
-    let alive=true;
-    if (stage==='preflop'){
-      alive = (Math.random()<effectiveKeepProbFor(i,'flop')) &&
-              (Math.random()<effectiveKeepProbFor(i,'turn')) &&
-              (Math.random()<effectiveKeepProbFor(i,'river'));
-    } else if (stage==='flop'){
-      alive = (Math.random()<effectiveKeepProbFor(i,'turn')) &&
-              (Math.random()<effectiveKeepProbFor(i,'river'));
-    } else if (stage==='turn'){
-      alive = (Math.random()<effectiveKeepProbFor(i,'river'));
-    } else alive = true;
-    if (alive) survivors.push(i);
-  }
-  while (survivors.length < SETTINGS.sim.minShowdownOpponents && survivors.length < baselineCount){
-    const cand = survivors.length;
-    if (!survivors.includes(cand)) survivors.push(cand);
-  }
-  return survivors;
+function sampleShowdownOpponents(baselineCount /*, board, maybeOppHands, maybeDeck */){
+  // Deterministic: include all baseline opponents; no stochastic continuation.
+  // (computeEquityStats() already sizes baselineCount from remaining players.)
+  return Array.from({length: Math.max(0, baselineCount)}, (_, i) => i);
 }
+
 
 function computeEquityStatsLegacy(hole, board, numOppOverride = null){
   const stage = stageFromBoard(board);
@@ -1030,7 +1239,7 @@ function computeEquityStatsLegacy(hole, board, numOppOverride = null){
   for (const [k,v] of catCount.entries()) catBreakdown.push({ name:k, pct:(v/trials)*100 });
   const catOrder = ['Straight Flush','Four of a Kind','Full House','Flush','Straight','Three of a Kind','Two Pair','One Pair','High Card'];
   catBreakdown.sort((a,b)=>{ const oi = catOrder.indexOf(a.name)-catOrder.indexOf(b.name); return oi!==0?oi:(b.pct-a.pct); });
-  return { equity, winPct, tiePct, losePct, trials, catBreakdown, numOpp: Math.max(1, SETTINGS.sim.playersBaseline) };
+  return { equity, winPct, tiePct, losePct, trials, catBreakdown, numOpp: Math.max(1, BASE_OPP) }; 
 }
 
 // TRAINING MODE: always compute equity vs random opponents,
@@ -1054,13 +1263,6 @@ function bandForError(error){
 }
 
 
-// ==================== Scoring & decisions ====================
-function bandForError(error){
-  const absErr=Math.abs(error);
-  if (absErr<=5) return "green";
-  if (absErr<=12) return "amber";
-  return "red";
-}
 function decisionBand(equity, potOdds, decision){
   const diff = equity - potOdds;
   const margin = 4;
@@ -1096,6 +1298,49 @@ const rangeModalBody = document.getElementById('rangeModalBody');
 const guideModalOverlay = document.getElementById('guideModalOverlay');
 const guideModalClose = document.getElementById('guideModalClose');
 const guideModalBody = document.getElementById('guideModalBody');
+
+// ==================== Personality Popover ====================
+const personaModal = (() => {
+  const overlay = document.createElement('div');
+  overlay.id = 'personaOverlay';
+  overlay.className = 'modal-overlay hidden';
+  overlay.innerHTML = `
+    <div class="modal">
+      <div class="modal-header">
+        <div id="personaTitle" style="font-weight:800"></div>
+        <button id="personaClose" class="btn" aria-label="Close">✕</button>
+      </div>
+      <div id="personaBody" class="modal-body"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.add('hidden'); });
+  overlay.querySelector('#personaClose').addEventListener('click', () => overlay.classList.add('hidden'));
+  return {
+    open(title, html){ 
+      overlay.querySelector('#personaTitle').textContent = title;
+      overlay.querySelector('#personaBody').innerHTML = html;
+      overlay.classList.remove('hidden');
+    }
+  };
+})();
+
+function openPersonalityPopover(letter){
+  const personaKey = SESSION_PERSONA_BY_LETTER[letter];
+  if (!personaKey) return;
+  const info = PERSONALITY_INFO[personaKey] || { label: personaKey, how:'', spot:'' };
+  const html = `
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <div><strong>Assigned to:</strong> Player ${letter}</div>
+      <div><strong>How they play:</strong> ${info.how}</div>
+      <div><strong>How to exploit / spot:</strong> ${info.spot}</div>
+      <div class="muted" style="opacity:.85">
+        (Assigned for this session; positions will rotate each hand.)
+      </div>
+    </div>
+  `;
+  personaModal.open(info.label, html);
+}
 
 const posPopover = document.getElementById('posPopover');
 const POS_ONE_LINERS = {
@@ -1827,10 +2072,94 @@ function classifyHeroHandAtPosition(){
   const cls = clsMap.get(code) || 'fold';
   return (cls === 'open') ? 'Open' : (cls === 'mix' ? 'Mix' : 'Fold');
 }
+
+// Context-aware preflop suggestion for the badge & modal.
+// Returns: { kind: 'Open'|'3-Bet'|'Call'|'Fold', band: 'green'|'amber'|'red', src: 'JSON'|'HYBRID'|'EXPLICIT'|'FALLBACK', detail?: string }
+function classifyHeroPreflopBadge(){
+  const seat = currentPosition();
+  const code = heroHandCode();
+  const opener = ENGINE.preflop?.openerSeat ?? null; // set in startNewHand() via engineSetPreflopContext(...)
+  // --- 1) Unopened pot -> use Open ranges for hero seat ---
+  if (!opener) {
+    // Prefer JSON open
+    try {
+      const bucket = RANGES_JSON?.open?.[seat];
+      if (bucket && bucket[code] != null) {
+        const cls = freqToClass(bucket[code]); // 'open' | 'mix' | 'fold'
+        if (cls === 'open')  return { kind:'Open', band:'green', src:'JSON' };
+        if (cls === 'mix')   return { kind:'Open', band:'amber', src:'JSON' };
+        return { kind:'Fold', band:'red', src:'JSON' };
+      }
+    } catch(e){/* fallback below */}
+    // Explicit fallback (your EXPLICIT_OPEN sets), then hybrid
+    try {
+      const clsMap = getClassMapForSeat(seat); // already prefers explicit, then hybrid
+      const cls = (clsMap.get(code) ?? 'fold');
+      if (cls === 'open')  return { kind:'Open', band:'green', src:'EXPLICIT' };
+      if (cls === 'mix')   return { kind:'Open', band:'amber', src:'EXPLICIT' };
+    } catch(e){}
+    return { kind:'Fold', band:'red', src:'FALLBACK' };
+  }
+
+  // --- 2) Facing an open -> prefer 3-bet if available, else Call, else Fold ---
+  // 2a) JSON 3-bet
+  try {
+    const key = `${seat}_vs_${opener}`;
+    const tb = RANGES_JSON?.three_bet?.[key];
+    if (tb && tb[code] != null) {
+      const cls = freqToClass(tb[code]);
+      if (cls === 'open') return { kind:'3-Bet', band:'green', src:'JSON' };
+      if (cls === 'mix')  return { kind:'3-Bet', band:'amber', src:'JSON' };
+    }
+  } catch(e){/* fallback next */}
+
+  // 2b) JSON Call (BB uses defend.BB_vs_<opener>; others use vs_open.<seat>_vs_<opener>.call)
+  try {
+    if (seat === 'BB') {
+      const key = `BB_vs_${opener}`;
+      const callBucket = RANGES_JSON?.defend?.[key];
+      if (callBucket && callBucket[code] != null) {
+        const cls = freqToClass(callBucket[code]);
+        if (cls === 'open') return { kind:'Call', band:'green', src:'JSON' };
+        if (cls === 'mix')  return { kind:'Call', band:'amber', src:'JSON' };
+      }
+    } else {
+      const key = `${seat}_vs_${opener}`;
+      const callObj = RANGES_JSON?.vs_open?.[key]?.call;
+      if (callObj && callObj[code] != null) {
+        const cls = freqToClass(callObj[code]);
+        if (cls === 'open') return { kind:'Call', band:'green', src:'JSON' };
+        if (cls === 'mix')  return { kind:'Call', band:'amber', src:'JSON' };
+      }
+    }
+  } catch(e){/* fallback next */}
+
+  // 2c) HYBRID fallbacks (token lists you already ship)
+  try {
+    // 3-bet hybrid
+    const lists3 = HYBRID_3BET_RANGES?.[seat]?.[opener] ?? null;
+    const lm3 = listToClassMap(lists3);
+    const cls3 = classFromLists(lm3, code); // 'open'|'mix'|'fold'
+    if (cls3 === 'open') return { kind:'3-Bet', band:'green', src:'HYBRID' };
+    if (cls3 === 'mix')  return { kind:'3-Bet', band:'amber', src:'HYBRID' };
+
+    // Call hybrid
+    const listsCall = HYBRID_DEFEND_RANGES?.[opener] ?? null; // defend maps keyed by opener seat
+    const lmC = listToClassMap(listsCall);
+    const clsC = classFromLists(lmC, code);
+    if (clsC === 'open') return { kind:'Call', band:'green', src:'HYBRID' };
+    if (clsC === 'mix')  return { kind:'Call', band:'amber', src:'HYBRID' };
+  } catch(e){}
+
+  // Nothing matched → Fold
+  return { kind:'Fold', band:'red', src:'FALLBACK' };
+}
+
 function setPositionDisc(){
   const pos = currentPosition();
   if (positionDisc) positionDisc.textContent = pos;
 }
+
 function setPreflopBadge() {
   if (!preflopRangeBadge) return;
 
@@ -1842,15 +2171,11 @@ function setPreflopBadge() {
     return;
   }
 
-  // Otherwise (Beginner mode & preflop): show normally
-  const cls = classifyHeroHandAtPosition();
+  const rec = classifyHeroPreflopBadge(); // {kind, band}
 
   preflopRangeBadge.classList.remove('hidden', 'green', 'amber', 'red');
-  preflopRangeBadge.textContent = `Preflop Range: ${cls}`;
-
-  if (cls === 'Open') preflopRangeBadge.classList.add('green');
-  else if (cls === 'Mix') preflopRangeBadge.classList.add('amber');
-  else preflopRangeBadge.classList.add('red');
+  preflopRangeBadge.textContent = `Preflop Range: ${rec.kind}`;
+  preflopRangeBadge.classList.add(rec.band);
 }
 
 // ==================== Range Modal (Open / 3bet / Defend) ====================
@@ -2007,6 +2332,7 @@ const defendToggleHtml = `
 const sourceLabel = (RANGES_JSON?.open?.[currentPosition()]) ? 'JSON' :
                     ((typeof EXPLICIT_OPEN !== 'undefined') ? 'Explicit' : 'Hybrid');
 
+// (existing, unchanged in your file)
 rangeModalBody.innerHTML = controlsHtml + defendToggleHtml +
   '<div style="margin-bottom:6px">' +
   '<span class="badge info">Range source: ' + sourceLabel + '</span>' +
@@ -2014,85 +2340,103 @@ rangeModalBody.innerHTML = controlsHtml + defendToggleHtml +
   '<div id="rangeSeatNote" class="range-help"></div>';
 rangeModalBody.appendChild(gridContainer);
 
-  // Initial render: OPEN
-  renderGridOrEmpty(classMapOpen());
-
-  const tabs = rangeModalBody.querySelectorAll('.tabbar .tab');
-  const vsSel = rangeModalBody.querySelector('#rangeVsSelect');
-
+// --- IMPORTANT: Grab DOM handles *after* writing innerHTML ---
+const tabs = rangeModalBody.querySelectorAll('.tabbar .tab');
+const vsSel = rangeModalBody.querySelector('#rangeVsSelect');
 let defendSubAction = 'call';
 const defendToggle = () => document.getElementById('defendToggle');
 
+// === Context-aware initial render (replaces old "Initial render: OPEN" + BB UX) ===
+const opener = ENGINE.preflop?.openerSeat ?? null;
+
+// Reuse the same classification the badge uses
+const badgeRec = classifyHeroPreflopBadge(); // { kind:'Open'|'3-Bet'|'Call'|'Fold', band:'green'|'amber'|'red' }
+
+// Decide which tab to open first
+let initialMode = 'open';        // 'open' | '3bet' | 'defend'
+let initialDefendSub = 'call';   // 'call' | 'three_bet'
+
+// If there is an opener, we are defending; default VS selector to that opener
+if (opener) {
+  initialMode = 'defend';
+  initialDefendSub = (badgeRec.kind === '3-Bet') ? 'three_bet' : 'call';
+  if (vsSel) {
+    vsSel.disabled = false;   // enable the vs selector
+    vsSel.value = opener;     // set actual opener seat
+  }
+}
+
+// Ensure the defend sub-toggle reflects our chosen sub-action before first render
+defendSubAction = initialDefendSub;
+
+// Override setActiveMode so it sets up tabs, sub-tabs, and grid consistently
 function setActiveMode(mode){
-  tabs.forEach(t=>t.classList.toggle('active', t.getAttribute('data-mode')===mode));
+  tabs.forEach(t => t.classList.toggle('active', t.getAttribute('data-mode') === mode));
+
   const enableVs = (mode !== 'open');
-  vsSel.disabled = !enableVs;
+  if (vsSel) vsSel.disabled = !enableVs;
 
-  // Show/hide the Defend sub‑toggle
   const dt = defendToggle();
-  if (dt) dt.style.display = (mode==='defend') ? 'inline-flex' : 'none';
+  if (dt) dt.style.display = (mode === 'defend') ? 'inline-flex' : 'none';
 
+  // If we're in defend mode, visually select the correct sub-tab
+  if (mode === 'defend') {
+    const dtEl = defendToggle();
+    if (dtEl) {
+      dtEl.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+      const want = dtEl.querySelector(`.tab[data-sub="${defendSubAction}"]`);
+      if (want) want.classList.add('active');
+    }
+  }
+
+  // Compute and render the appropriate grid for this mode
   let clsMap = null;
-  if (mode==='open') {
+  if (mode === 'open') {
     clsMap = classMapOpen();
-  } else if (mode==='3bet') {
-    clsMap = classMap3bet(vsSel.value);
-  } else { // defend
-    clsMap = classMapDefend(vsSel.value, defendSubAction);
+  } else if (mode === '3bet') {
+    clsMap = classMap3bet(vsSel ? vsSel.value : 'UTG');
+  } else { // 'defend'
+    clsMap = classMapDefend(vsSel ? vsSel.value : 'UTG', defendSubAction);
   }
   renderGridOrEmpty(clsMap);
 }
 
-
-
+// Wire the existing click handlers
+tabs.forEach(t => t.addEventListener('click', () => setActiveMode(t.getAttribute('data-mode'))));
+if (vsSel) {
+  vsSel.addEventListener('change', () => {
+    const active = [...tabs].find(t => t.classList.contains('active'))?.getAttribute('data-mode') || 'open';
+    setActiveMode(active);
+  });
+}
+// Sub-toggle for defend (call / 3-bet)
 (function wireDefendToggle(){
   const dt = defendToggle(); if (!dt) return;
-  dt.addEventListener('click', (e)=>{
+  dt.addEventListener('click', (e) => {
     const btn = e.target.closest('.tab'); if (!btn) return;
-    dt.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    dt.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
     btn.classList.add('active');
     defendSubAction = btn.getAttribute('data-sub') || 'call';
     setActiveMode('defend');
   });
 })();
 
+// Do the first paint using our chosen context
+setActiveMode(initialMode);
 
-  tabs.forEach(t=> t.addEventListener('click', ()=> setActiveMode(t.getAttribute('data-mode'))));
-  vsSel.addEventListener('change', ()=>{
-    const active = [...tabs].find(t=>t.classList.contains('active'))?.getAttribute('data-mode') || 'open';
-    setActiveMode(active);
-  });
-
-// ---- BB UX: default to DEFEND and add note that BB never opens ----
-if (seat === 'BB') {
-  const noteEl = rangeModalBody.querySelector('#rangeSeatNote');
-  if (noteEl) {
-    noteEl.textContent = 'BB never opens preflop — use the Defend tab (vs opener).';
+// (optional) update the seat note line if you want
+const noteEl = rangeModalBody.querySelector('#rangeSeatNote');
+if (noteEl) {
+  if (opener) {
+    noteEl.textContent = `Vs ${opener}: choose Call or 3‑bet against the opener.`;
+  } else {
+    noteEl.textContent = `Seat: ${currentPosition()} · Hybrid baseline (solver‑inspired, simplified).`;
   }
-  // Enable the VS selector (we need a villain opener)
-  vsSel.disabled = false;
-  // Pick a sensible default opener to defend against
-  vsSel.value = 'UTG';
-
-  // Disable the OPEN tab to avoid confusion
-  const openTab = [...tabs].find(t => t.getAttribute('data-mode') === 'open');
-  if (openTab) {
-    openTab.setAttribute('aria-disabled', 'true');
-    openTab.classList.add('disabled');
-    openTab.addEventListener('click', (e) => e.preventDefault());
-  }
-
-  // Switch the view to DEFEND
-
-  setActiveMode('defend');
-} else {
-  const noteEl = rangeModalBody.querySelector('#rangeSeatNote');
-  if (noteEl) noteEl.textContent = 'Vs Open: choose Call or 3‑bet against the selected opener seat.';
 }
 
-
-  rangeModalOverlay.classList.remove('hidden');
+   rangeModalOverlay.classList.remove('hidden');
 }
+
 function closeRangeModal(){ if (rangeModalOverlay) rangeModalOverlay.classList.add('hidden'); }
 function showPosPopover(){
   if (!positionDisc || !posPopover) return;
@@ -2786,6 +3130,9 @@ if (!RANGES_JSON) {
 
   // Rotate 6-max position
   heroPosIdx = (heroPosIdx + 1) % POSITIONS6.length;
+  rotateLettersForNewHand();      // seats move around the table
+  recomputeProfilesFromLetters(); // update engine profile map for this hand
+  heroNewHand();
 
   preflopAggressor = null;
   heroActions.preflop = { action:null, sizeBb:null };
@@ -2858,9 +3205,26 @@ Object.keys(ENGINE.statusBySeat).forEach(seat => {
     prevEquity = computeEquityStats(holeCards, prevBoard).equity;
   } catch(e){ /* ignore calc errors */ }
 
-  // Deal new street
-  if (stage==="flop"){ boardCards.push(dealCard(), dealCard(), dealCard()); }
-  else if (stage==="turn" || stage==="river"){ boardCards.push(dealCard()); }
+// Deal new street + record that hero reached this street
+if (stage === "flop") {
+  boardCards.push(dealCard(), dealCard(), dealCard());
+
+  // Keep your existing status mapping for the flop
+  applyPreflopParticipantsToStatuses();
+
+  // NEW: track hero reaching the flop
+  markStreetReached('flop');
+} else if (stage === "turn") {
+  boardCards.push(dealCard());
+
+  // NEW: track hero reaching the turn
+  markStreetReached('turn');
+} else if (stage === "river") {
+  boardCards.push(dealCard());
+
+  // NEW: track hero reaching the river
+  markStreetReached('river');
+}
 
   // Recompute survivors for this street (villain fold/continue is deterministic)
   try { engineRecomputeSurvivorsForStreet(boardCards); } catch(e){}
@@ -2955,6 +3319,27 @@ function renderPositionStatusRow() {
     const stack = document.createElement("div");
     stack.className = "pos-seat-stack";
 
+    // NEW: letter chip (above the disc)
+    const letter = (LETTERS_BY_POSITION && LETTERS_BY_POSITION[seat]) ? LETTERS_BY_POSITION[seat] : "–";
+    const chip = document.createElement("div");
+    chip.className = "player-letter-chip";
+    chip.textContent = letter;
+    chip.setAttribute("role", "button");
+    chip.setAttribute("tabindex", "0");
+ if (letter === HERO_LETTER) chip.classList.add('hero');
+   
+// NEW: hero vs villain click behavior
+if (letter === HERO_LETTER) {
+  chip.title = "Click to view your current style";
+  chip.addEventListener("click", () => openHeroEvaluationPopover());
+} else {
+  chip.title = "Click for player style";
+  chip.addEventListener("click", () => openPersonalityPopover(letter));
+}
+stack.appendChild(chip);
+
+
+
     // Disc
     const disc = document.createElement("div");
     if (seat === heroSeat) {
@@ -3011,6 +3396,10 @@ try {
     && h.decision === 'fold'
   );
   const reachedRiver = (boardCards.length === 5);
+
+// --- HERO METRICS (end-of-hand) ---
+  if (reachedRiver && !heroFolded) { markHeroShowdown(); }  // saw showdown
+  if (heroFolded)                  { markHeroFolded();   }  // folded this hand
 
   let shouldReveal = false;
   if (reveal === 'always_remaining') shouldReveal = true;
@@ -3122,6 +3511,10 @@ inputForm.addEventListener("submit", (e)=>{
   const potOddsInput = parseFloat(document.getElementById("potOddsInput").value);
   const decision = new FormData(inputForm).get("decision");
   const stage = STAGES[currentStageIndex];
+// --- HERO METRICS (preflop) ---
+if (stage === 'preflop') {
+  updateHeroPreflop(decision, toCall);
+}
 
   const equityStats = computeEquityStats(holeCards, boardCards);
   const actualEquity = equityStats.equity;
@@ -3147,7 +3540,7 @@ inputForm.addEventListener("submit", (e)=>{
         <span class="badge ${decisionBandResult}">${decisionBandResult.toUpperCase()}</span></div>
       <div style="margin-top:8px">
         <strong>How this is calculated:</strong><br/>
-        Equity is from a Monte–Carlo simulation this street (baseline you vs ${SETTINGS.sim.playersBaseline} opponent${SETTINGS.sim.playersBaseline===1?'':'s'}) with street-by-street continuation to showdown.
+        Equity is from a Monte–Carlo simulation this street sized to the number of opponents still in the hand (minimum 1).
         Trials this stage: ${equityStats.trials}.<br/>
         Pot odds use call / (pot + call), where “pot” is the pre-call pot (the number shown).
       </div>
@@ -3183,6 +3576,11 @@ const actionLabel = determinePostflopAction(decision, toCall); // you already us
 const stageNow = STAGES[currentStageIndex];
 if (stageNow === 'flop' || stageNow === 'turn' || stageNow === 'river') {
   settleVillainsAfterHero(stageNow, actionLabel);
+}
+
+// --- HERO METRICS (postflop) ---
+if (stageNow === 'flop' || stageNow === 'turn' || stageNow === 'river') {
+  updateHeroPostflop(stageNow, actionLabel);
 }
 
   // ===== Phase 1: Preflop coaching & data
@@ -3602,18 +4000,6 @@ function createSettingsPanel(){
       <label>Baseline Opponents (6‑max: use 5)</label>
       <input type="number" id="set_playersBaseline" min="1" max="5" value="${Math.min(5, SETTINGS.sim.playersBaseline)}"/>
 
-      <label>See Flop %</label>
-      <input type="number" id="set_rateFlop" min="0" max="100" value="${Math.round(SETTINGS.sim.continueRate.flop*100)}"/>
-
-      <label>See Turn %</label>
-      <input type="number" id="set_rateTurn" min="0" max="100" value="${Math.round(SETTINGS.sim.continueRate.turn*100)}"/>
-
-      <label>See River %</label>
-      <input type="number" id="set_rateRiver" min="0" max="100" value="${Math.round(SETTINGS.sim.continueRate.river*100)}"/>
-
-      <label>Range‑aware continuation</label>
-      <input type="checkbox" id="set_rangeAware" ${SETTINGS.sim.rangeAwareContinuation ? 'checked' : ''}/>
-
       <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
 
       <label>Sim Quality</label>
@@ -3648,6 +4034,7 @@ function createSettingsPanel(){
   <option value="on_hero_fold">Show when hero folds</option>
 </select>
 
+
       <!-- NEW: Blind editor -->
       <label>Small Blind (£)</label>
       <input type="number" id="set_sb" min="0" step="5" value="${toStep5(BLINDS.sb)}"/>
@@ -3663,6 +4050,51 @@ function createSettingsPanel(){
     </div>
   `;
   document.body.appendChild(panel);
+
+// --- After: panel.innerHTML = ` ... `; (keep your existing code above this line)
+
+// A small separator
+const sep = document.createElement('div');
+sep.style.cssText = "grid-column:1/3;border-top:1px solid #374151;margin:8px 0";
+
+// Container row to align with the grid
+const row = document.createElement('div');
+row.style.cssText = "grid-column:1/3; display:flex; gap:8px; justify-content:flex-start; align-items:center";
+
+// The actual button
+const resetBtn = document.createElement('button');
+resetBtn.className = 'btn';
+resetBtn.textContent = 'Reset personalities';
+
+// Optional helper text
+const hint = document.createElement('span');
+hint.className = 'muted';
+hint.style.opacity = '.85';
+hint.textContent = '  (Re‑rolls player letters’ styles for this browser session)';
+
+// Click handler
+resetBtn.addEventListener('click', () => {
+  try {
+    sessionStorage.removeItem('trainer_personas_v1'); // remove current session assignment
+    initSessionPersonalities();                       // re-sample personalities for this session
+    recomputeProfilesFromLetters();                   // rebuild VILLAIN_PROFILE_BY_SEAT from letters
+    renderPositionStatusRow();                        // redraw row so letter chips persist
+    alert('Personality assignments reset for this session.');
+  } catch (e) {
+    console.warn('Reset personalities failed', e);
+    alert('Could not reset personalities. Check console for details.');
+  }
+});
+
+row.appendChild(resetBtn);
+row.appendChild(hint);
+
+// --- Insert Reset Personalities BEFORE the Apply button row ---
+const applyRow = panel.querySelector('div[style*="justify-content:flex-end"]');
+panel.insertBefore(sep, applyRow);
+panel.insertBefore(row, applyRow);
+
+
 
   function applyQualityPreset(presetName){
     const preset = TRIALS_PRESETS[presetName]; if (!preset) return;
@@ -3690,11 +4122,7 @@ function createSettingsPanel(){
 
   panel.querySelector("#applySettings").addEventListener("click", () => {
     SETTINGS.sim.playersBaseline = Math.max(1, Math.min(5, parseInt(panel.querySelector("#set_playersBaseline").value,10) || 4));
-    SETTINGS.sim.continueRate.flop  = Math.max(0, Math.min(1, ((parseFloat(panel.querySelector("#set_rateFlop").value)  || 65)/100)));
-    SETTINGS.sim.continueRate.turn  = Math.max(0, Math.min(1, ((parseFloat(panel.querySelector("#set_rateTurn").value)  || 55)/100)));
-    SETTINGS.sim.continueRate.river = Math.max(0, Math.min(1, ((parseFloat(panel.querySelector("#set_rateRiver").value) || 45)/100)));
-    SETTINGS.sim.rangeAwareContinuation = !!panel.querySelector("#set_rangeAware").checked;
-
+   
     const chosen = panel.querySelector("#set_quality").value;
     SETTINGS.simQualityPreset = chosen;
     if (chosen!=='Custom') applyQualityPreset(chosen);
@@ -3958,7 +4386,316 @@ if (difficulty === "beginner") {
 // NEW: Try to load hosted ranges for all users (falls back to storage/built-ins)
   ensureRangesLoaded();
 
+initSessionPersonalities(); // <-- new: sample once per session and seat letters
+
 
   // Hide swing chip at boot
   updateKpiEquitySwing(0, null);
 })();
+
+/***************************************************
+ * DETERMINISTIC POST-FLOP ENGINE (INLINE MODULE)
+ * ----------------------------------------------
+ * This block overrides RNG-based villain behaviour
+ * with a deterministic, table-driven engine.
+ *
+ * It reuses your existing helpers:
+ *   - analyzeBoard(board, hole)
+ *   - evaluate7(hole, board)
+ *   - detectStraightDrawFromAllCards(all)
+ ***************************************************/
+
+// ==== Deterministic Villain Engine (prefixed DVE_) ====
+let DVE_HOST = { analyzeBoard: null, evaluate7: null, detectStraightDrawFromAllCards: null };
+function DVE_bindHostFns({ analyzeBoard, evaluate7, detectStraightDrawFromAllCards }){
+  DVE_HOST.analyzeBoard = analyzeBoard;
+  DVE_HOST.evaluate7 = evaluate7;
+  DVE_HOST.detectStraightDrawFromAllCards = detectStraightDrawFromAllCards;
+}
+
+const DVE_VILLAIN_PROFILES = {
+  Honest:   { aggro: 0.85, turnAggro: 0.80, riverBluff: 0.10, caller:  1.10 },
+  Standard: { aggro: 1.00, turnAggro: 1.00, riverBluff: 0.20, caller:  1.00 },
+  Aggro:    { aggro: 1.20, turnAggro: 1.10, riverBluff: 0.30, caller:  0.90 },
+  Nit:      { aggro: 0.70, turnAggro: 0.70, riverBluff: 0.05, caller:  0.80 },
+     Station:  { aggro: 0.70, turnAggro: 0.70, riverBluff: 0.08, caller:  1.30 }, 
+  Maniac:   { aggro: 1.40, turnAggro: 1.20, riverBluff: 0.45, caller:  0.80 }
+};
+
+function DVE_classifyTexture(board){
+  const wetness = DVE_HOST.analyzeBoard(board, []).wetnessScore;
+  if (wetness >= 3.5) return 'Wet';
+  if (wetness >= 2.0) return 'Semi-Wet';
+  if (wetness >= 1.0) return 'Semi-Dry';
+  return 'Dry';
+}
+
+function DVE_classifyHandBucket(hole, board){
+  const score = DVE_HOST.evaluate7(hole, board);
+  const all = [...hole, ...board];
+  const { openEnder, gutshot } = DVE_HOST.detectStraightDrawFromAllCards(all);
+  const suitCount = {};
+  all.forEach(c => { suitCount[c.suit] = (suitCount[c.suit]||0)+1; });
+  const flushDraw = Object.values(suitCount).some(v => v === 4);
+
+  if (score.cat >= 4) return 'StrongMade';
+  if (score.cat === 3 || score.cat === 2) return 'StrongMade';
+  if (score.cat === 1) return 'MediumMade';
+  if (flushDraw || openEnder) return 'Draw';
+  if (gutshot) return 'WeakSD';
+  return 'Air';
+}
+
+const DVE_CBET_BASE = { 'Dry':0.80, 'Semi-Dry':0.65, 'Semi-Wet':0.50, 'Wet':0.35 };
+const DVE_CBET_MOD  = { Air:-0.20, WeakSD:-0.10, Draw:+0.20, MediumMade:+0.10, StrongMade:+0.25 };
+
+const DVE_TURN_BASE = { Blank:0.45, Overcard:0.35, DrawComplete:0.20, Paired:0.25 };
+const DVE_TURN_MOD  = { Air:-0.30, WeakSD:-0.20, Draw:+0.10, MediumMade:+0.15, StrongMade:+0.30 };
+
+const DVE_FOLD_THRESH = {
+  flop:{
+    Air:{'Dry':90,'Semi-Dry':80,'Semi-Wet':70,'Wet':60},
+    WeakSD:{'Dry':60,'Semi-Dry':50,'Semi-Wet':40,'Wet':30},
+    MediumMade:{'Dry':20,'Semi-Dry':15,'Semi-Wet':10,'Wet':5},
+    StrongMade:{'Dry':0,'Semi-Dry':0,'Semi-Wet':0,'Wet':0}
+  },
+  turn:{
+    Air:{'Dry':100,'Semi-Dry':100,'Semi-Wet':100,'Wet':100},
+    WeakSD:{'Dry':80,'Semi-Dry':70,'Semi-Wet':60,'Wet':55},
+    MediumMade:{'Dry':40,'Semi-Dry':30,'Semi-Wet':20,'Wet':15},
+    StrongMade:{'Dry':5,'Semi-Dry':5,'Semi-Wet':5,'Wet':5}
+  },
+  river:{ Air:100, WeakSD:80, MediumMade:50, StrongMade:10 }
+};
+
+function DVE_getBetDecision(texture, bucket, profile, street, turnCardContext){
+  const vp = DVE_VILLAIN_PROFILES[profile];
+  if (street === 'flop'){
+    let base = DVE_CBET_BASE[texture] + (DVE_CBET_MOD[bucket]||0);
+    base *= vp.aggro;
+    return { willBet: base >= 0.50, sizePct: base >= 0.50 ? 33 : null };
+  }
+  if (street === 'turn'){
+    const key = turnCardContext || 'Blank';
+    let base = (DVE_TURN_BASE[key] ?? DVE_TURN_BASE.Blank) + (DVE_TURN_MOD[bucket]||0);
+    base *= vp.turnAggro;
+    return { willBet: base >= 0.50, sizePct: base >= 0.50 ? 66 : null };
+  }
+  if (street === 'river'){
+    if (bucket === 'StrongMade') return { willBet:true, sizePct:66 };
+    if (bucket === 'MediumMade' && profile !== 'Honest') return { willBet:true, sizePct:50 };
+    if (bucket === 'Air'){
+      const freq = DVE_VILLAIN_PROFILES[profile].riverBluff;
+      return { willBet: freq >= 0.25, sizePct: freq >= 0.25 ? 75 : null };
+    }
+    return { willBet:false, sizePct:null };
+  }
+  return { willBet:false, sizePct:null };
+}
+
+function DVE_getFoldDecision(texture, bucket, profile, street, handScore0to100){
+  const adjust = DVE_VILLAIN_PROFILES[profile].caller;
+  let thresh;
+  if (street === 'river') thresh = (DVE_FOLD_THRESH.river[bucket] ?? 100) * adjust;
+  else thresh = ((DVE_FOLD_THRESH[street]?.[bucket]?.[texture]) ?? 100) * adjust;
+  return handScore0to100 < thresh ? 'fold' : 'continue';
+}
+
+function DVE_getCallDecision(texture, bucket, profile, betSize, potSize){
+  const price = betSize / (potSize + betSize); // pot odds threshold
+
+  // Crude equity proxy by bucket (directional only)
+  let eqHave =
+    bucket === 'Air'        ? 0.10 :
+    bucket === 'WeakSD'     ? 0.22 :
+    bucket === 'Draw'       ? 0.35 :
+    bucket === 'MediumMade' ? 0.55 :
+    /* StrongMade */          0.75;
+
+  // Profile adjustment: 'caller' > 1.0 calls a bit wider; < 1.0 folds a bit more
+  const vp = DVE_VILLAIN_PROFILES[profile] ?? DVE_VILLAIN_PROFILES.Standard;
+  eqHave = Math.min(0.99, Math.max(0, eqHave * vp.caller));
+
+  return (eqHave >= price) ? 'call' : 'fold';
+}
+
+function DVE_getVillainAction(ctx){
+  const { street, villainProfile, villainHole, board, toCall, pot, turnCardContext } = ctx;
+  const texture = DVE_classifyTexture(board);
+  const bucket = DVE_classifyHandBucket(villainHole, board);
+  const handScore = bucket==='Air'?10 : bucket==='WeakSD'?30 : bucket==='Draw'?50 : bucket==='MediumMade'?70 : 90;
+
+  if (toCall > 0){
+    const foldOrContinue = DVE_getFoldDecision(texture, bucket, villainProfile, street, handScore);
+    if (foldOrContinue === 'fold') return { action:'fold' };
+    const callOrFold = DVE_getCallDecision(texture, bucket, villainProfile, toCall, pot);
+    if (callOrFold === 'fold') return { action:'fold' };
+    return { action:'call' };
+  }
+  const bet = DVE_getBetDecision(texture, bucket, villainProfile, street, turnCardContext);
+  if (bet.willBet) return { action:'bet', sizePct: bet.sizePct };
+  return { action:'check' };
+}
+
+// ==== Per-seat villain profiles (tunable) ====
+
+let VILLAIN_PROFILE_BY_SEAT = { UTG:'Standard', HJ:'Standard', CO:'Standard', BTN:'Standard', SB:'Standard', BB:'Standard' };
+
+// Map our personalities to the engine profile keys
+function profileKeyFor(persona) {
+  if (persona === 'TAG') return 'Standard';
+  if (persona === 'LAG') return 'Aggro';
+  if (persona === 'STATION') return 'Station';
+  if (persona === 'NIT') return 'Nit';
+  if (persona === 'MANIAC') return 'Maniac';
+  return 'Standard';
+}
+
+function recomputeProfilesFromLetters(){
+  const map = {};
+  for (const pos of ["UTG","HJ","CO","BTN","SB","BB"]) {
+    const L = LETTERS_BY_POSITION[pos];
+    if (L === HERO_LETTER) {
+      // Hero seat: engine never uses a villain profile for hero anyway.
+      continue;
+    }
+    const persona = SESSION_PERSONA_BY_LETTER[L];
+    map[pos] = profileKeyFor(persona);
+  }
+  VILLAIN_PROFILE_BY_SEAT = map; // your deterministic engine reads this map
+}
+
+// ==== Override: engineRecomputeSurvivorsForStreet → no-op (keep statuses) ====
+function engineRecomputeSurvivorsForStreet(board){
+  try { ENGINE.lastStreetComputed = stageFromBoard(board); } catch(e) {}
+  // Deterministic engine sets ENGINE.statusBySeat via action points; we don't prune here.
+}
+
+// Turn helper used by the deterministic engine
+function determineTurnCardContext(prevBoard, currBoard) {
+  try {
+    // Reuse your existing transition analyzer
+    const trans = classifyTransition(prevBoard, currBoard, holeCards);
+
+    // First priority: board pairs on turn
+    if (trans.boardPairedUp) return 'Paired';
+
+    // Second: front-door flush completes or 4-to-straight appears
+    if (trans.gotMonotone || trans.nowFourToStraight) return 'DrawComplete';
+
+    // Third: an overcard to T/Q/K/A showed up
+    if (trans.overcardCame) return 'Overcard';
+
+    // Otherwise treat as a blank / neutral card
+    return 'Blank';
+  } catch (e) {
+    // Fail-safe: never break the stage advance
+    return 'Blank';
+  }
+}
+
+// ==== Override: postflopVillainActionsUpToHero (deterministic) ====
+
+function postflopVillainActionsUpToHero(stage){
+  const heroSeat = currentPosition();
+  STREET_CTX.stage = stage;
+  STREET_CTX.potAtStart = pot;
+  STREET_CTX.openBettor = null;
+  STREET_CTX.openSizePct = null;
+  STREET_CTX.openBetToCall = 0; // <-- reset live price for this street
+
+  const seq = [];
+  for (const seat of POSTFLOP_ORDER){ if (seat === heroSeat) break; seq.push(seat); }
+  if (seq.length === 0) return;
+
+  let pendingToCall = 0;
+  const prevBoard = boardCards.slice(0, stage==='turn'?3:(stage==='river'?4:0));
+  const turnCtx = (stage==='turn') ? determineTurnCardContext(prevBoard, boardCards) : undefined;
+
+  for (const seat of seq){
+    if (ENGINE.statusBySeat[seat] !== 'in') continue;
+    const hole = seatHand(seat); if (!hole) continue;
+
+    const ctx = {
+      street: stage,
+      villainProfile: VILLAIN_PROFILE_BY_SEAT[seat] ?? 'Standard',
+      villainHole: hole,
+      board: boardCards,
+      toCall: pendingToCall,
+      pot,
+      turnCardContext: turnCtx
+    };
+    const a = DVE_getVillainAction(ctx);
+
+    if (a.action === 'fold'){
+      ENGINE.statusBySeat[seat] = 'folded_now';
+      continue;
+    }
+    if (a.action === 'call'){
+      pot = toStep5(pot + pendingToCall);
+      continue;
+    }
+    if (a.action === 'bet'){
+      const amt = Math.max(5, toStep5((a.sizePct/100) * pot));
+      pendingToCall = amt;
+      STREET_CTX.openBetToCall = amt;     // <-- remember live price
+      pot = toStep5(pot + amt);           // <-- add bettor’s chips now
+      scenario = { label: `${seat} bets ${a.sizePct}%`, potFactor: 0 };
+      STREET_CTX.openBettor = seat;
+      STREET_CTX.openSizePct = a.sizePct;
+    }
+  }
+
+  toCall = toStep5(pendingToCall);
+  updatePotInfo();
+  if (toCall <= 0) scenario = { label: 'Checks to you' };
+}
+
+// ==== Override: settleVillainsAfterHero (deterministic callers behind hero) ====
+function settleVillainsAfterHero(stage, heroAction){
+  const hadLiveBet = (STREET_CTX.openBetToCall ?? 0) > 0;
+  if (!(heroAction === 'bet' || heroAction === 'raise' || (heroAction === 'call' && hadLiveBet))) return;
+
+  const heroSeat = currentPosition();
+  const seq = []; let afterHero = false;
+  for (const seat of POSTFLOP_ORDER){
+    if (seat === heroSeat){ afterHero = true; continue; }
+    if (afterHero) seq.push(seat);
+  }
+
+  // Price to the field:
+  let toCallAmt;
+  if (heroAction === 'bet' || heroAction === 'raise'){
+    const betPct = (heroActions[stage]?.sizePct ?? 50);
+    toCallAmt = Math.max(5, toStep5((betPct/100) * STREET_CTX.potAtStart));
+  } else {
+    toCallAmt = toStep5(STREET_CTX.openBetToCall); // <-- price from earlier villain bet
+  }
+
+  for (const seat of seq){
+    if (ENGINE.statusBySeat[seat] !== 'in') continue;
+    const hole = seatHand(seat); if (!hole) continue;
+
+    const ctx = {
+      street: stage,
+      villainProfile: VILLAIN_PROFILE_BY_SEAT[seat] ?? 'Standard',
+      villainHole: hole,
+      board: boardCards,
+      toCall: toCallAmt,
+      pot
+    };
+    const a = DVE_getVillainAction(ctx);
+
+    if (a.action === 'call')       pot = toStep5(pot + toCallAmt);
+    else if (a.action === 'fold')  ENGINE.statusBySeat[seat] = 'folded_now';
+  }
+  updatePotInfo();
+}
+
+// ==== Bind host functions once helpers exist ====
+(function DVE_bootstrap(){
+  try { DVE_bindHostFns({ analyzeBoard, evaluate7, detectStraightDrawFromAllCards }); }
+  catch(e){ console.warn('[DVE] Bind failed – ensure helpers are defined before this block runs.'); }
+})();
+
+/* === END deterministic engine block === */
