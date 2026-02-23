@@ -913,6 +913,7 @@ const kpiCallEl = document.getElementById("kpiToCall");
 const kpiTimerEl = document.getElementById("kpiTimer");
 // Optional chip (will be null if you didn't add it in HTML; code no-ops then)
 const kpiEquitySwingEl = document.getElementById("kpiEquitySwing");
+const kpiScenarioEl = document.getElementById("kpiScenario");
 
 const bottomBar = document.getElementById("bottomBar");
 const barPotOdds = document.getElementById("barPotOdds");
@@ -1001,6 +1002,13 @@ function updatePotInfo(){
   const pOdds = computePotOdds(pot, toCall);
   if (barPotOdds) barPotOdds.textContent = isFinite(pOdds) ? `Pot odds ${pOdds.toFixed(1)}%` : 'Pot odds —';
   // Keep Bet/Raise label + size rows in sync
+// Scenario → Mobile KPI chip (safe even if scenario is null)
+if (kpiScenarioEl) {
+  const label = (scenario && scenario.label) ? String(scenario.label) : "—";
+  kpiScenarioEl.textContent = `📜 ${label}`;
+  kpiScenarioEl.title = label;            // tooltip for truncated text
+  kpiScenarioEl.setAttribute('aria-label', `Scenario: ${label}`);
+}
   updateDecisionLabels();
 }
 
