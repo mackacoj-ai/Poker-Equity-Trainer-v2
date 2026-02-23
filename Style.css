@@ -627,6 +627,15 @@ body.compact-auto .primary{ padding:9px 14px; }
 .ehs-btn{appearance:none;border:1px solid #2C3750;background:#121A2A;color:#DDE6F5;border-radius:10px;padding:8px 12px;font-weight:600;cursor:pointer}
 .ehs-btn:hover{background:#17223A}
 
+/* Mobile KPI scenario chip (optional styling) */
+.kpi-chip.kpi-scenario {
+  max-width: 40vw;          /* keep it compact on mobile */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;  /* … for long labels */
+}
+``
+
 /* =========================================================
    Stability override (kept small) — ensures preflop heatmap
    colours win even if another stylesheet sets .cell bkg.
