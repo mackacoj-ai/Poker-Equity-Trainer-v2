@@ -136,6 +136,25 @@ function updateHeroPreflop(decision, toCall){
   }
 }
 
+function updateHeroPreflop(decision /*, _toCall */){
+// VPIP counts both opens and calls
+ if (decision === 'call' || decision === 'raise') HERO_STATS.vpip++;
+
+if (decision === 'raise') {
+ const opener      = ENGINE?.preflop?.openerSeat ?? null;
+ const threeBetter = ENGINE?.preflop?.threeBetterSeat ?? null;
+// First-in raise (RFI) → PFR
+ if (!opener) {
+  HERO_STATS.pfr++;
+  }
+  // Raise vs open (first re-raise) → 3-bet
+   else if (opener && !threeBetter) {
+      HERO_STATS.threeBet++;
+  }
+
+   }
+ }
+
 // Postflop update: action label from determinePostflopAction(decision, toCall)
 function updateHeroPostflop(stage, actionLabel){
   if (actionLabel === 'bet') HERO_STATS.bet++;
@@ -920,6 +939,7 @@ const SETTINGS = {
   simQualityPreset: 'Balanced',
   trialsByStage: { preflop: 4000, flop: 6000, turn: 8000, river: 12000 }
 };
+
 const TRIALS_PRESETS = {
   Mobile:   { preflop: 2000, flop: 4000, turn: 6000, river: 8000 },
   Balanced: { preflop: 4000, flop: 6000, turn: 8000, river: 12000 },
@@ -1046,26 +1066,37 @@ function engineRecomputeSurvivorsForStreet(board){
 
   const prev = new Set(ENGINE.survivors);
 
-  if (street === 'flop'){
-    ENGINE.survivors.clear();
-    if (ENGINE.preflop.openerSeat) ENGINE.survivors.add(ENGINE.preflop.openerSeat);
+if (street === 'flop'){
+  ENGINE.survivors.clear();
+
+  if (ENGINE.preflop.openerSeat) {
+    // Raised pot: keep existing behavior (opener / 3-bettor / cold callers)
+    ENGINE.survivors.add(ENGINE.preflop.openerSeat);
     if (ENGINE.preflop.threeBetterSeat) ENGINE.survivors.add(ENGINE.preflop.threeBetterSeat);
     (ENGINE.preflop.coldCallers ?? []).forEach(seat => ENGINE.survivors.add(seat));
+  } else {
+    // *** Unopened pot → it checks through preflop ***
+    // Seed blinds so they never appear folded on the flop.
+    ENGINE.survivors.add('SB');
+    ENGINE.survivors.add('BB');
 
-    // Deterministic filter
-    ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
+    // Optionally include the hero if they did not fold preflop.
+    try {
+      const heroSeat = currentPosition();
+      const heroFoldedPre = handHistory.some(h => h.stage === 'preflop' && h.decision === 'fold');
+      if (!heroFoldedPre) ENGINE.survivors.add(heroSeat);
+    } catch (e) { /* keep robust */ }
+  }
 
-    // Soft guarantee: keep exactly one preflop participant if all pruned
-    if (ENGINE.survivors.size === 0) {
-      const pool = new Set();
-      if (ENGINE.preflop.openerSeat) pool.add(ENGINE.preflop.openerSeat);
-      if (ENGINE.preflop.threeBetterSeat) pool.add(ENGINE.preflop.threeBetterSeat);
-      (ENGINE.preflop.coldCallers ?? []).forEach(s => pool.add(s));
-      const order = ["BTN","CO","HJ","UTG","SB","BB"];
-      let pick = order.find(s => pool.has(s));
-      if (!pick && pool.size > 0) pick = [...pool][0];
-      if (pick) ENGINE.survivors.add(pick);
-    }
+  // Deterministic continue filter for flop
+  ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
+
+  // (Optional) Soft guarantee: never show empty survivors in no-raise pots
+  // You may keep or remove this; keeping adds resilience.
+  if (ENGINE.survivors.size === 0 && !ENGINE.preflop.openerSeat) {
+    ENGINE.survivors.add('BB');
+  }
+  
   } else if (street === 'turn') {
     // Re-evaluate currently alive villains
     ENGINE.survivors = new Set([...ENGINE.survivors].filter(seat => engineContinueOnStreet(seat, board)));
@@ -1121,22 +1152,22 @@ function countOpponentsInPlay(board){
 }
 
 // Small hook from Phase 1 to remember opener / 3-bettor
-function engineSetPreflopContext(openerSeat, threeBetterSeat, coldCallers){
-  ENGINE.preflop.openerSeat = openerSeat || null;
-  ENGINE.preflop.threeBetterSeat = threeBetterSeat || null;
+function engineSetPreflopContext(openerSeat, threeBetterSeat, coldCallers, openToBb){
+  ENGINE.preflop.openerSeat = openerSeat ?? null;
+  ENGINE.preflop.threeBetterSeat = threeBetterSeat ?? null;
   ENGINE.preflop.coldCallers = Array.isArray(coldCallers) ? coldCallers.slice() : [];
-
+  ENGINE.preflop.openToBb = (openToBb == null ? null : Number(openToBb)); // NEW: opener raise-to (in BB)
   // Keep a flat list of preflop participants — used if the hand ends preflop
   const parts = [];
   if (ENGINE.preflop.openerSeat) parts.push(ENGINE.preflop.openerSeat);
   if (ENGINE.preflop.threeBetterSeat) parts.push(ENGINE.preflop.threeBetterSeat);
-  (ENGINE.preflop.coldCallers || []).forEach(s => parts.push(s));
+  (ENGINE.preflop.coldCallers ?? []).forEach(s => parts.push(s));
   ENGINE.preflop.participants = [...new Set(parts)];
-
   ENGINE.survivors.clear();
   ENGINE.survivorsByStreet = { flop: [], turn: [], river: [] };
   ENGINE.lastStreetComputed = 'preflop';
 }
+
 
 // Mark only the preflop participants (plus hero) as "in" when we get to the flop
 function applyPreflopParticipantsToStatuses(){
@@ -1963,10 +1994,11 @@ function postedBlindFor(seat){
 
 // Add a "raise-to" (open/3-bet) contribution to pot (trainer-simple)
 function contributeRaiseTo(pot, raiseTo, seat){
-  // In this trainer, we simply add the full raise-to amount (as you do for hero).
-  // This keeps accounting consistent with applyHeroContribution(...).
-  return toStep5(pot + toStep5(raiseTo));
+  const already = postedBlindFor(seat); // SB/BB -> 5/10; others -> 0
+  const putIn = Math.max(0, toStep5(raiseTo) - toStep5(already));
+  return toStep5(pot + putIn);
 }
+
 // Add a "call" contribution to pot
 function contributeCallTo(pot, targetTo, seat){
   const already = postedBlindFor(seat);
@@ -2079,7 +2111,9 @@ function classifyHeroPreflopBadge(){
   const seat = currentPosition();
   const code = heroHandCode();
   const opener = ENGINE.preflop?.openerSeat ?? null; // set in startNewHand() via engineSetPreflopContext(...)
-  // --- 1) Unopened pot -> use Open ranges for hero seat ---
+ const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
+ 
+ // --- 1) Unopened pot -> use Open ranges for hero seat ---
   if (!opener) {
     // Prefer JSON open
     try {
@@ -2100,6 +2134,32 @@ function classifyHeroPreflopBadge(){
     } catch(e){}
     return { kind:'Fold', band:'red', src:'FALLBACK' };
   }
+
+// --- 2) Facing a 3-bet before hero acts (opener + threeBetter exist) ---
+if (opener && threeBetter) {
+  // Optional JSON support: RANGES_JSON.vs_3bet
+  // Accept either a detailed key with opener context or a simpler key.
+  try {
+    const key1 = `${seat}_vs_${threeBetter}_over_${opener}`;
+    const key2 = `${seat}_vs_${threeBetter}`;
+    const rb = RANGES_JSON?.vs_3bet?.[key1] || RANGES_JSON?.vs_3bet?.[key2];
+    if (rb) {
+      // Expect schema like: { four_bet: { [code]: freq }, call: { [code]: freq } }
+      const fb = rb.four_bet ? freqToClass(rb.four_bet[code]) : null;
+      const cb = rb.call     ? freqToClass(rb.call[code])     : null;
+      if (fb === 'open')  return { kind:'4-Bet', band:'green', src:'JSON' };
+      if (fb === 'mix')   return { kind:'4-Bet', band:'amber', src:'JSON' };
+      if (cb === 'open')  return { kind:'Call',  band:'green', src:'JSON' };
+      if (cb === 'mix')   return { kind:'Call',  band:'amber', src:'JSON' };
+      // Else fall through to conservative fallback
+    }
+  } catch(e){ /* ignore and use fallback */ }
+
+  // Conservative fallback (safe default): only top value hands 4-bet; everything else folds.
+  const strong4b = new Set(['AA','KK','QQ','AKs','AKo']);
+  if (strong4b.has(code)) return { kind:'4-Bet', band:'green', src:'FALLBACK' };
+  return { kind:'Fold', band:'red', src:'FALLBACK' };
+}
 
   // --- 2) Facing an open -> prefer 3-bet if available, else Call, else Fold ---
   // 2a) JSON 3-bet
@@ -2348,22 +2408,20 @@ const defendToggle = () => document.getElementById('defendToggle');
 
 // === Context-aware initial render (replaces old "Initial render: OPEN" + BB UX) ===
 const opener = ENGINE.preflop?.openerSeat ?? null;
+const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
 
-// Reuse the same classification the badge uses
-const badgeRec = classifyHeroPreflopBadge(); // { kind:'Open'|'3-Bet'|'Call'|'Fold', band:'green'|'amber'|'red' }
+let initialMode = 'open';
+let initialDefendSub = 'call';
 
-// Decide which tab to open first
-let initialMode = 'open';        // 'open' | '3bet' | 'defend'
-let initialDefendSub = 'call';   // 'call' | 'three_bet'
-
-// If there is an opener, we are defending; default VS selector to that opener
-if (opener) {
+// If a 3-bet exists, use the three-bettor as the 'vs' seat and pick the 3-bet sub-tab
+if (threeBetter) {
+  initialMode = 'defend';
+  initialDefendSub = 'three_bet';
+  if (vsSel) { vsSel.disabled = false; vsSel.value = threeBetter; }
+} else if (opener) {
   initialMode = 'defend';
   initialDefendSub = (badgeRec.kind === '3-Bet') ? 'three_bet' : 'call';
-  if (vsSel) {
-    vsSel.disabled = false;   // enable the vs selector
-    vsSel.value = opener;     // set actual opener seat
-  }
+  if (vsSel) { vsSel.disabled = false; vsSel.value = opener; }
 }
 
 // Ensure the defend sub-toggle reflects our chosen sub-action before first render
@@ -2677,16 +2735,95 @@ function closeGuideModal(){ if (guideModalOverlay) guideModalOverlay.classList.a
 function updateDecisionLabels(){
   const stage = STAGES[currentStageIndex];
   const decRaiseLabel = document.querySelector('label[for="decRaise"]');
-  if (!decRaiseLabel) return;
-  if (stage==='preflop') decRaiseLabel.textContent = "Raise";
-  else decRaiseLabel.textContent = (toCall>0) ? "Raise" : "Bet";
+  const decCallLabel  = document.querySelector('label[for="decCall"]'); // <-- NEW
 
-  const isPre = (stage==='preflop'), isPost = !isPre;
+  if (decRaiseLabel) {
+    if (stage === 'preflop') decRaiseLabel.textContent = "Raise";
+    else decRaiseLabel.textContent = (toCall > 0) ? "Raise" : "Bet";
+  }
+
+  if (decCallLabel) {
+    // If no price to call, show "Check"; otherwise "Call"
+    decCallLabel.textContent = (toCall > 0) ? "Call" : "Check";
+  }
+
+  const isPre  = (stage === 'preflop');
+  const isPost = !isPre;
   const raiseChecked = document.getElementById('decRaise')?.checked;
-  if (sizePresetRow) sizePresetRow.classList.toggle('hidden', !(isPre && raiseChecked));
+
+  if (sizePresetRow)     sizePresetRow.classList.toggle('hidden', !(isPre  && raiseChecked));
   if (sizePresetRowPost) sizePresetRowPost.classList.toggle('hidden', !(isPost && raiseChecked));
 }
 
+// Dynamically retarget preflop size pills:
+// - No opener → ×BB (openers)
+// - Facing opener → ×(opener's raise-to)
+
+function updatePreflopSizePresets(){
+  if (!sizePresetRow) return;
+
+  const hero   = currentPosition();
+  const opener = ENGINE?.preflop?.openerSeat ?? null;
+  const pills  = Array.from(sizePresetRow.querySelectorAll('.size-bb'));
+
+  // Ensure we have an info line under the pills
+  let note = document.getElementById('preSizeContextNote');
+  if (!note){
+    note = document.createElement('div');
+    note.id = 'preSizeContextNote';
+    note.className = 'muted';
+    note.style.marginTop = '6px';
+    sizePresetRow.appendChild(note);
+  }
+
+  // --- Seed a permanent ×BB base the first time we see each pill ---
+  // HTML should provide a data-bb initially (e.g., 2.0, 2.2, 2.5...), we copy it once.
+  pills.forEach(btn => {
+    const base = btn.getAttribute('data-bb-base');
+    if (base == null) {
+      const bbInit = btn.getAttribute('data-bb');
+      if (bbInit != null) btn.setAttribute('data-bb-base', bbInit);
+    }
+  });
+
+  if (!opener){
+    // ========== OPENING: restore ×BB labels & attributes ==========
+    pills.forEach(btn => {
+      const base = parseFloat(btn.getAttribute('data-bb-base')); // permanent source of truth
+      if (isFinite(base)) {
+        btn.setAttribute('data-bb', String(base));   // restore data-bb
+        btn.removeAttribute('data-mult');            // clear 3-bet mode
+        btn.textContent = `${base.toFixed(1)}× BB`;  // label as ×BB
+      }
+    });
+    note.textContent = 'Opening: sizes are multiples of the Big Blind (×BB).';
+    // Clear any leftover 3-bet multiplier in state
+    heroActions.preflop.sizeMult = null;
+    return;
+  }
+
+  // ========== Facing an opener: switch to fixed × of open set ==========
+  // Determine IP vs OOP (optional text note only)
+  const iHero = ACTION_ORDER.indexOf(hero);
+  const iOp   = ACTION_ORDER.indexOf(opener);
+  const heroActsAfterOpener = (iHero > iOp);
+  const heroIP = heroActsAfterOpener && hero !== 'SB' && hero !== 'BB';
+
+  // Fixed 3-bet presets (future-proofs 4-bet UI)
+  const M = [2.0, 2.2, 2.5, 3.0, 4.0, 5.0];
+
+  // Re-label pills as × of open; store multipliers; drop transient data-bb
+  pills.forEach((btn, idx) => {
+    const mult = M[Math.min(idx, M.length - 1)];
+    btn.setAttribute('data-mult', String(mult));
+    btn.removeAttribute('data-bb');               // we'll restore from data-bb-base next time
+    btn.textContent = `×${mult} of open`;
+  });
+
+  note.textContent = heroIP
+    ? '3-bet sizing basis: × of opener (IP guideline ≈ ×3).'
+    : '3-bet sizing basis: × of opener (OOP guideline ≈ ×4).';
+}
 // ==================== Phase 3 helpers/evaluators ====================
 function determinePostflopAction(decision, toCall){
   if (decision==='fold') return 'fold';
@@ -2907,9 +3044,89 @@ if (toCall <= 0) {
 } 
 }
 
+// Villains act behind Hero if Hero checked (or did not open the betting)
+// Simulates one "betting opportunity" behind Hero: first live bettor may bet; later seats may fold/call/rare-raise.
+function villainsActAfterHeroCheck(stage) {
+
+  // If a live price already exists, do not produce another stab
+  if (toCall > 0) { updatePotInfo(); return; }
+
+  const heroSeat = currentPosition();
+
+
+// Build acting sequence only for seats *after* hero; do NOT wrap.
+ const order = POSTFLOP_ORDER.slice(); // ["SB","BB","UTG","HJ","CO","BTN"]
+const startIdx = order.indexOf(heroSeat);
+if (startIdx < 0) return;
+const seq = order.slice(startIdx + 1); // act only behind Hero this street
+
+  if (seq.length === 0) return;
+
+  let pendingToCall = 0;
+
+  for (const seat of seq) {
+    // Must be alive
+    const state = ENGINE.statusBySeat[seat];
+    if (state !== "in") continue;
+
+    const hole = seatHand(seat);
+    if (!hole) continue;
+
+    const isPFR = (ENGINE.preflop.openerSeat === seat);
+
+    if (pendingToCall === 0) {
+      // Seat may start the betting (probe/stab)
+      const p = villainBetProbability(seat, isPFR, stage, boardCards, holeCards);
+      if (Math.random() < p) {
+        const pct = pickVillainSizePct(stage, boardCards, holeCards);
+        const amt = Math.max(5, toStep5((pct/100) * pot));
+        pendingToCall = amt;
+
+        // Update scenario / context (consistent with your pre-hero pass)
+        scenario = { label: `${seat} bets ${pct}%`, potFactor: 0 };
+        STREET_CTX.openBettor = seat;
+        STREET_CTX.openSizePct = pct;
+        continue; // allow later seats to react
+      } else {
+        continue; // checked; move on
+      }
+    } else {
+      // A live bet exists; this seat reacts
+      const strength = villainStrengthBucket(hole, boardCards);
+
+      // Rare raises
+      const willRaise = Math.random() < VILLAIN.raiseOverBetFreq && (strength === 'strong' || strength === 'draw');
+      if (willRaise) {
+        const pct = Math.max(66, pickVillainSizePct(stage, boardCards, holeCards));
+        const raiseTo = Math.max(pendingToCall * 2, toStep5((pct/100) * pot)); // raise-to (keeps your model)
+        pendingToCall = raiseTo;
+        scenario = { label: `${seat} raises to ${pct}%`, potFactor: 0 };
+        continue;
+      }
+
+      // Weak hands fold some of the time; others notionally call (we do not add to pot yet; hero sees the price first)
+      if ((strength === 'weak' || strength === 'weak_draw') && Math.random() < VILLAIN.foldFracFacingBetWeak) {
+        ENGINE.statusBySeat[seat] = "folded_now";
+      }
+    }
+  }
+
+  // Present price to Hero if anyone bet/raised
+  toCall = toStep5(pendingToCall);
+  updatePotInfo(); // also flips Call⇄Check label via updateDecisionLabels()
+  if (toCall > 0) {
+    const callRadio = document.getElementById('decCall');
+    if (callRadio) callRadio.checked = true;
+  }
+
+  // If nobody bet behind, set a friendly label
+  if (toCall <= 0) {
+    scenario = { label: "Checks through" };
+  }
+}
 function settleVillainsAfterHero(stage, heroAction){
   // Only simulate extra callers when hero made an aggressive action without a live bet
-  if (!(heroAction === 'bet' || heroAction === 'raise')) return;
+  if (!(heroAction === 'bet' || heroAction === 'raise' || heroAction === 'call')) return;
 
   // If hero 'bet' (no live bet), estimate hero's bet size from pot at start of street
   if (heroAction === 'bet' && (heroActions[stage]?.sizePct != null)) {
@@ -3151,30 +3368,65 @@ preflopAggressor = pf.openerSeat ? 'villain' : null;
 // Friendly label for the UI
 scenario = { label: pf.label, potFactor: 0 };
 
-engineSetPreflopContext(pf.openerSeat, pf.threeBetterSeat, pf.coldCallers);
+engineSetPreflopContext(pf.openerSeat, pf.threeBetterSeat, pf.coldCallers, pf.openToBb);
 
   renderCards();
   setPositionDisc();
   setPreflopBadge();
-  renderPositionStatusRow();
-  updatePotInfo();
-  updateHintsImmediate();
-  maybeStartTimer();
+
+// NEW: mark early preflop folders (before Hero) as red on the discs
+(function markPreflopFolders(){
+  const hero = currentPosition();
+  // Build list of seats that act before hero in preflop order
+  const before = [];
+  for (const s of ACTION_ORDER) { if (s === hero) break; before.push(s); }
+
+  // Seats that are definitely still live before hero: opener, 3-bettor, cold callers (if any)
+  const keep = new Set();
+  if (pf.openerSeat) keep.add(pf.openerSeat);
+  if (pf.threeBetterSeat) keep.add(pf.threeBetterSeat);
+  (pf.coldCallers || []).forEach(s => keep.add(s));
+
+  // Mark seats that acted before hero and did NOT continue as folded_now (red)
+  before.forEach(seat => {
+    ENGINE.statusBySeat[seat] = keep.has(seat) ? "in" : "folded_now";
+  });
+})();
+
+updatePreflopSizePresets(); // NEW: set correct basis (×BB vs × of open)
+renderPositionStatusRow();
+updatePotInfo();
+updateHintsImmediate();
+maybeStartTimer();
 }
 
+// Stage-aware "all folded" banner.
+// Pass 'preflop' explicitly for true walks; otherwise pass the current street key.
+function showAllFoldedMessage(stageKey) {
+  if (!feedbackEl) return;
+
+  // Clear any prior feedback for clarity
+  feedbackEl.innerHTML = "";
+
+  // Pretty print the stage
+  const key = (stageKey || STAGES[currentStageIndex] || '').toString().toLowerCase();
+  const pretty =
+    key === 'preflop' ? 'Pre-flop' :
+    key === 'flop'    ? 'Flop'     :
+    key === 'turn'    ? 'Turn'     :
+    key === 'river'   ? 'River'    :
+    key.toUpperCase();
+
+  feedbackEl.insertAdjacentHTML('beforeend', `
+    <div class="walk-banner" role="status" aria-live="polite">
+      <strong>All folded ${pretty} — you win the pot.</strong>
+    </div>
+  `);
+}
+
+// Back-compat adapter (used by preflop-walk path)
 function showWalkMessage() {
-    if (!feedbackEl) return;
-
-    // Clear any prior feedback for clarity
-    // (If you prefer to keep previous lines, remove the next line)
-    feedbackEl.innerHTML = "";
-
-    // Insert the message line
-    feedbackEl.insertAdjacentHTML('beforeend', `
-        <div class="walk-banner" role="status" aria-live="polite">
-            <strong>Everyone folds preflop — you win the pot.</strong>
-        </div>
-    `);
+  showAllFoldedMessage('preflop');
 }
 
 function advanceStage(){
@@ -3199,15 +3451,23 @@ Object.keys(ENGINE.statusBySeat).forEach(seat => {
   const stage = STAGES[currentStageIndex];
 
   // --- Equity Swing: compute prev equity on previous board snapshot (include preflop) ---
-  const prevBoard = [...boardCards];
-  let prevEquity = null;
-  try {
-    prevEquity = computeEquityStats(holeCards, prevBoard).equity;
-  } catch(e){ /* ignore calc errors */ }
+const prevBoard = [...boardCards];
+let prevEquity = null;
+try {
+  prevEquity = computeEquityStats(holeCards, prevBoard).equity;
+} catch (e) { /* ignore calc errors */ }
 
 // Deal new street + record that hero reached this street
 if (stage === "flop") {
+  // Defensive: if preflop had no raiser at all, ensure BB is in participants (SB is raise-or-fold)
+  if (!ENGINE.preflop.openerSeat && !ENGINE.preflop.threeBetterSeat) {
+    const parts = new Set(ENGINE.preflop.participants || []);
+    parts.add('BB'); // only BB auto-checks to flop in unopened pot; SB does not limp
+    ENGINE.preflop.participants = [...parts];
+  }
+
   boardCards.push(dealCard(), dealCard(), dealCard());
+
 
   // Keep your existing status mapping for the flop
   applyPreflopParticipantsToStatuses();
@@ -3236,7 +3496,7 @@ if (stage === "flop") {
     .some(s => s !== hero && ENGINE.statusBySeat[s] === "in");
   if (!anyVillainIn) {
     renderPositionStatusRow();
-    showWalkMessage(); // already in your file
+    showAllFoldedMessage(stage); // <-- say "All folded Flop/Turn/River"
     endHand();
     return;
   }
@@ -3252,7 +3512,7 @@ if (STAGES[currentStageIndex] === "flop") {
     Object.keys(ENGINE.statusBySeat).forEach(seat => {
       if (seat !== hero) ENGINE.statusBySeat[seat] = "folded_prev";
     });
-    showWalkMessage();
+    showAllFoldedMessage(stage); // <-- say "All folded Flop/Turn/River"
     renderPositionStatusRow();
     endHand();
     return;
@@ -3309,7 +3569,9 @@ function renderPositionStatusRow() {
   if (!row) return;
 
   const heroSeat = currentPosition();
-  const pfrSeat = ENGINE.preflop.openerSeat || null;  // show PFR for hero or villain
+  // Show current aggressor: if a 3-bet exists, show it; else show the opener
+  const pfrSeat = (ENGINE.preflop.threeBetterSeat ?? ENGINE.preflop.openerSeat ?? null);
+
 
   const seats = ["UTG","HJ","CO","BTN","SB","BB"];
   row.innerHTML = "";
@@ -3381,6 +3643,160 @@ if (seat === pfrSeat) {
   });
 }
 
+// ==================== End-of-Hand Summary (modal) ====================
+// Build a compact result: winners, pot, board, and reveal policy
+function buildEndHandResult(){
+  const heroSeat = currentPosition();
+  const allSeats = ["UTG","HJ","CO","BTN","SB","BB"];
+  // Determine if hero folded at any point this hand (your history already stores this)
+  const heroFolded = handHistory.some(h =>
+    (h.stage === 'preflop' || h.stage === 'flop' || h.stage === 'turn' || h.stage === 'river') &&
+    h.decision === 'fold'
+  );
+
+  // Seats still "in" for villains come from ENGINE.statusBySeat (hero is tracked separately)
+  const aliveVillains = allSeats.filter(s => s !== heroSeat && ENGINE.statusBySeat[s] === 'in');
+  const survivors = heroFolded ? aliveVillains : [...aliveVillains, heroSeat];
+
+  const isRiver = (boardCards.length === 5);
+  let winners = [];
+
+  if (survivors.length <= 1) {
+    winners = survivors.slice();
+  } else if (isRiver) {
+    // River showdown (or river fold with >1 alive prior to last action): compute best hand(s)
+    let bestScore = null, bestSeats = [];
+    for (const s of survivors){
+      const hole = seatHand(s);
+      if (!hole || hole.length < 2) continue;
+      const sc = evaluate7(hole, boardCards); // your evaluator
+      if (!bestScore){
+        bestScore = sc; bestSeats = [s];
+      } else {
+        const cmp = compareScores(sc, bestScore); // >0 means 'sc' is better in your code
+        if (cmp > 0) { bestScore = sc; bestSeats = [s]; }
+        else if (cmp === 0) { bestSeats.push(s); }
+      }
+    }
+    winners = bestSeats.length ? bestSeats : survivors.slice();
+  } else {
+    // Not river and multi-way — we can only say who is still alive; treat as winners list
+    winners = survivors.slice();
+  }
+
+  // Decide whether to reveal villains now (re-use your REVEAL.policy)
+  const policy = (typeof REVEAL !== 'undefined' && REVEAL && REVEAL.policy) ? REVEAL.policy : 'always_all';
+  const revealVillains =
+    policy === 'always_all' ||
+    policy === 'always_remaining' ||
+    (policy === 'showdown_only' && isRiver) ||
+    (policy === 'on_hero_fold' && heroFolded);
+
+  // Build payload
+  return {
+    pot,
+    board: [...boardCards],
+    winners: winners.map(seat => ({
+      seat,
+      hole: seatHand(seat) || null,
+      // Show "winning hand" label only when river is present
+      made: (isRiver && seatHand(seat))
+        ? (describeMadeHand(seatHand(seat), boardCards)?.label || null)
+        : null
+    })),
+    revealVillains
+  };
+}
+
+// Render the summary modal (CSS is in your stylesheet)
+function showEndHandSummary(result){
+  if (!result) return;
+
+  // Avoid duplicate modals
+  const existing = document.getElementById('ehs-backdrop');
+  if (existing) existing.remove();
+
+  const backdrop = document.createElement('div');
+  backdrop.id = 'ehs-backdrop';
+  backdrop.className = 'ehs-backdrop';
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+
+  const card = document.createElement('div');
+  card.className = 'ehs-card';
+
+  const header = document.createElement('div');
+  header.className = 'ehs-header';
+  const streetBadge =
+    (result.board.length === 5) ? 'River' :
+    (result.board.length === 4) ? 'Turn' :
+    (result.board.length === 3) ? 'Flop' : 'Preflop';
+  header.innerHTML = `
+    <div class="ehs-title">Hand Summary</div>
+    <span class="ehs-badge">${streetBadge}</span>
+  `;
+
+  const body = document.createElement('div');
+  body.className = 'ehs-body';
+
+  // Pot
+  const potEl = document.createElement('div');
+  potEl.className = 'ehs-row ehs-pot';
+  potEl.innerHTML = `Pot won: <strong>£${(result.pot ?? 0).toFixed(0)}</strong>`;
+  body.appendChild(potEl);
+
+  // Board strip
+  const boardEl = document.createElement('div');
+  boardEl.className = 'ehs-row';
+  boardEl.innerHTML = `<div>Board:</div>`;
+  const strip = document.createElement('div'); strip.className = 'ehs-board';
+  (result.board || []).forEach(c => {
+    const chip = document.createElement('div');
+    chip.className = 'ehs-cardchip';
+    chip.textContent = c ? `${c.rank}${c.suit}` : '';
+    strip.appendChild(chip);
+  });
+  boardEl.appendChild(strip);
+  body.appendChild(boardEl);
+
+  // Winners
+  result.winners.forEach(w => {
+    const div = document.createElement('div');
+    div.className = 'ehs-winner';
+    const madeText = (result.board.length === 5 && w.made) ? `<span class="made">• ${w.made}</span>` : '';
+    div.innerHTML = `<div><span class="name">Winner: ${w.seat}</span> ${madeText}</div>`;
+
+    // Hole cards reveal (villains if policy allows; hero always OK to show)
+    const heroSeat = currentPosition();
+    const shouldReveal = result.revealVillains || (w.seat === heroSeat);
+    if (shouldReveal && Array.isArray(w.hole) && w.hole.length >= 2){
+      const holeRow = document.createElement('div');
+      holeRow.className = 'ehs-hole';
+      w.hole.forEach(c => {
+        const chip = document.createElement('div');
+        chip.className = 'ehs-cardchip';
+        chip.textContent = `${c.rank}${c.suit}`;
+        holeRow.appendChild(chip);
+      });
+      div.appendChild(holeRow);
+    }
+    body.appendChild(div);
+  });
+
+  const actions = document.createElement('div');
+  actions.className = 'ehs-actions';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'ehs-btn';
+  closeBtn.textContent = 'Close';
+  closeBtn.addEventListener('click', () => backdrop.remove());
+  actions.appendChild(closeBtn);
+
+  card.appendChild(header);
+  card.appendChild(body);
+  card.appendChild(actions);
+  backdrop.appendChild(card);
+  document.body.appendChild(backdrop);
+}
+
 function endHand(){
   clearTimer();
 
@@ -3389,7 +3805,7 @@ function endHand(){
 
 // Villain reveal (Always remaining / Always all / Showdown-only / On hero fold)
 try {
-  const reveal = (REVEAL?.policy ?? 'always_remaining');
+  const reveal = (REVEAL?.policy ?? 'always_all');
 
   const heroFolded = handHistory.some(h =>
     (h.stage === 'preflop' || h.stage === 'flop' || h.stage === 'turn' || h.stage === 'river')
@@ -3449,6 +3865,13 @@ try {
 
 
   renderPositionStatusRow();
+// NEW: show end-of-hand summary modal
+try {
+  const result = buildEndHandResult();
+  showEndHandSummary(result);
+} catch (e) {
+  console.warn('End-hand summary failed:', e);
+}
   showSummary();
   sessionHistory.push(...handHistory);
   saveSessionHistory();
@@ -3474,17 +3897,49 @@ function applyHeroContribution(decision){
   }
 
   if (decision === 'raise') {
-    if (stage === 'preflop') {
-      // Treat preflop “Raise” as an open/raise-to (size in BB)
-      const bb = toStep5(BLINDS.bb);
-      const sizeBB = (heroActions.preflop.sizeBb ?? 2.5);
-      const target = toStep5(sizeBB * bb); // "raise to" amount
-      // Hero puts full 'target' into pot when first-in; if facing completion (SB), this still functions as raise-to.
-      pot = toStep5(pot + target);
-      toCall = 0;
-      updatePotInfo();
-      return;
-    } else {
+if (stage === 'preflop') {
+  const bb = toStep5(BLINDS.bb);
+  const heroSeat = currentPosition();
+  const opener = ENGINE.preflop?.openerSeat ?? null;
+
+  // Chips hero already posted from blinds
+  const heroAlready = (heroSeat === 'SB') ? toStep5(BLINDS.sb)
+                    : (heroSeat === 'BB') ? toStep5(BLINDS.bb)
+                    : 0;
+
+  // *** KEY FIX ***
+  const heroIsOpener = (opener === heroSeat);
+  const facingOpen   = !!opener && !heroIsOpener;
+
+  if (!opener || heroIsOpener) {
+    // ===== OPENING raise: ×BB basis =====
+    const sizeBB = (heroActions.preflop.sizeBb ?? 2.5);
+    const raiseTo = toStep5(sizeBB * bb);            // raise-to in chips
+    const putIn   = Math.max(0, raiseTo - heroAlready);
+    pot   = toStep5(pot + putIn);
+    toCall = 0;
+    updatePotInfo();
+    return;
+  } else {
+    // ===== 3-BET vs opener: × of opener's raise-to =====
+    const openToBb = Number(ENGINE.preflop?.openToBb ?? 2.2); // safe default if sim didn't store
+    const iHero    = ACTION_ORDER.indexOf(heroSeat);
+    const iOp      = ACTION_ORDER.indexOf(opener);
+    const heroIP   = (iHero > iOp) && heroSeat !== 'SB' && heroSeat !== 'BB';
+    const defaultMult = heroIP ? 3.0 : 4.0;
+    const mult     = (heroActions.preflop.sizeMult != null) ? heroActions.preflop.sizeMult : defaultMult;
+
+    const raiseToBb = mult * openToBb;               // raise-to in BB
+    const raiseTo   = toStep5(raiseToBb * bb);       // chips
+    const putIn     = Math.max(0, raiseTo - heroAlready);
+    pot   = toStep5(pot + putIn);
+    toCall = 0;
+    updatePotInfo();
+    return;
+  }
+}
+
+else {
       // Postflop: Bet (toCall==0) or Raise (toCall>0)
       const pct = heroActions[stage].sizePct ?? 50;
       const betBase = pot; // base is current pot
@@ -3511,9 +3966,80 @@ inputForm.addEventListener("submit", (e)=>{
   const potOddsInput = parseFloat(document.getElementById("potOddsInput").value);
   const decision = new FormData(inputForm).get("decision");
   const stage = STAGES[currentStageIndex];
+
+// Guard: require a decision to be selected
+if (!decision) {
+  // Keep UI responsive: keep Submit visible if a live price exists, else allow Next
+  const hasLivePrice = (toCall > 0);
+  const msg = hasLivePrice
+    ? 'Please choose Call / Raise / Fold to respond to the bet.'
+    : 'Please choose Check / Bet / Fold before submitting.';
+  feedbackEl.insertAdjacentHTML('afterbegin', `<div class="warn">${msg}</div>`);
+  // Preserve buttons: if facing a price, stay on Submit; otherwise, allow Next
+  submitStageBtn.classList.toggle('hidden', !hasLivePrice);
+  nextStageBtn.classList.toggle('hidden',  hasLivePrice);
+  if (barSubmit) barSubmit.classList.toggle('hidden', !hasLivePrice);
+  if (barNext)   barNext.classList.toggle('hidden',  hasLivePrice);
+  return;
+}
+
+// Decide what the action *means* before we change any pot/toCall
+  const actionLabelPre   = determinePostflopAction(decision, toCall);
+  const hadLivePricePre  = (toCall > 0);
+  const stageNow         = STAGES[currentStageIndex];
+
 // --- HERO METRICS (preflop) ---
 if (stage === 'preflop') {
   updateHeroPreflop(decision, toCall);
+}
+
+// Keep PFR/3-bet badge in sync when hero raises preflop
+if (stage === 'preflop' && decision === 'raise') {
+  const heroSeat = currentPosition();
+  const opener      = ENGINE?.preflop?.openerSeat ?? null;
+  const threeBetter = ENGINE?.preflop?.threeBetterSeat ?? null;
+
+  if (!opener) {
+    // Hero is opening first-in: mark hero as the table PFR
+    ENGINE.preflop.openerSeat = heroSeat;
+    ENGINE.preflop.participants = Array.from(new Set([
+      ...(ENGINE.preflop.participants || []),
+      heroSeat
+    ]));
+  } else if (opener && !threeBetter) {
+    // Hero is 3-betting vs the existing opener
+    ENGINE.preflop.threeBetterSeat = heroSeat;
+    ENGINE.preflop.participants = Array.from(new Set([
+      ...(ENGINE.preflop.participants || []),
+      heroSeat
+    ]));
+  }
+
+// --- Ensure blinds see a flop when nobody raises preflop ---
+// If there is still no opener after the hero's action, treat it as "checks through" preflop.
+// That means BB (and SB) should be marked as participants who see the flop.
+if (stage === 'preflop') {
+  const opener = ENGINE?.preflop?.openerSeat ?? null;
+  const threeBetter = ENGINE?.preflop?.threeBetterSeat ?? null;
+
+  // Only when absolutely no preflop raise occurred:
+  //  - no opener (so no raise to begin with)
+  //  - and, by definition, no three-bet
+  if (!opener && !threeBetter) {
+    // Build/extend the preflop participants set
+    const parts = new Set(ENGINE.preflop?.participants || []);
+    // Blinds are in the hand and will see the flop when it checks through
+    parts.add('BB');
+    parts.add('SB');
+    // (Optionally include hero if they didn't fold)
+    const heroDidNotFold = (decision !== 'fold');
+    if (heroDidNotFold) parts.add(currentPosition());
+
+    ENGINE.preflop.participants = [...parts];
+  }
+}
+  // Repaint the status row so the blue "PFR" pill reflects the hero when relevant
+  renderPositionStatusRow();
 }
 
   const equityStats = computeEquityStats(holeCards, boardCards);
@@ -3571,16 +4097,28 @@ if (stage === 'preflop') {
  applyHeroContribution(decision);
    if (decision === 'fold') return; // endHand() may have been called
 
-// === Settle some field callers when hero bets, so pot grows realistically
-const actionLabel = determinePostflopAction(decision, toCall); // you already use this elsewhere
-const stageNow = STAGES[currentStageIndex];
+// === Settle some field callers or allow stabs *based on the pre-action label*
 if (stageNow === 'flop' || stageNow === 'turn' || stageNow === 'river') {
-  settleVillainsAfterHero(stageNow, actionLabel);
+  if (actionLabelPre === 'bet' || actionLabelPre === 'raise') {
+  
+  // Existing behavior: add some callers behind
+    settleVillainsAfterHero(stageNow, actionLabelPre);
+  } else if (actionLabelPre === 'check') {
+    // NEW: let villains stab behind your check
+    villainsActAfterHeroCheck(stageNow);
+
+ } else if (actionLabelPre === 'call' && hadLivePricePre) {
+// DVE hook: let engine settle on hero CALL vs a live price, then advance
+ try { settleVillainsAfterHero(stageNow, 'call'); } catch (_) {}
+advanceStage();
+return;
+
+  }
 }
 
 // --- HERO METRICS (postflop) ---
 if (stageNow === 'flop' || stageNow === 'turn' || stageNow === 'river') {
-  updateHeroPostflop(stageNow, actionLabel);
+  updateHeroPostflop(stageNow, actionLabelPre);
 }
 
   // ===== Phase 1: Preflop coaching & data
@@ -3596,32 +4134,70 @@ if (stageNow === 'flop' || stageNow === 'turn' || stageNow === 'river') {
       const pos = POSITIONS6[heroPosIdx];
       const rangeClass = classifyHeroHandAtPosition();
 
-      let sizeEval="", sizeAdvice="";
-      if (decision==="raise" && heroActions.preflop.sizeBb!=null){
-        const bb = heroActions.preflop.sizeBb;
-        const [min,max] = recommendedOpenSizeRangeBb(pos);
-        if (bb>=min && bb<=max) sizeEval="Good";
-        else if (bb<min && bb>=(min-0.3)) sizeEval="Slightly small";
-        else if (bb<min) sizeEval="Too small";
-        else if (bb>max && bb<=(max+0.5)) sizeEval="Slightly large";
-        else sizeEval="Too large";
-        sizeAdvice = buildSizeAdvice(pos, bb, min, max);
-      }
+// ---- Preflop size evaluation (render exactly one line when relevant) ----
+let sizingHtml = ""; // final line to inject (either Opening or 3‑Bet), else empty
 
-      const sizeLine = (decision==="raise" && heroActions.preflop.sizeBb!=null)
-        ? `<div>Open size: ${heroActions.preflop.sizeBb.toFixed(1)}x — <span class="badge ${sizeEvalBadgeColor(sizeEval)}">${sizeEval||'n/a'}</span></div>
-           <div style="opacity:.9">${sizeAdvice}</div>` : "";
+const opener      = ENGINE.preflop?.openerSeat ?? null;
+const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
+const heroSeat    = currentPosition();
+const heroIsOpener = (opener === heroSeat);
+const facingOpen   = !!opener && !heroIsOpener;            // someone else opened
+const facing3Bet   = !!opener && !!threeBetter && (threeBetter !== heroSeat); // someone 3-bet before hero
 
-      feedbackEl.insertAdjacentHTML('beforeend', `
-        <div style="margin-top:8px">
-          <strong>Preflop (6‑max ${pos}):</strong>
-          <div>Range check: <span class="badge ${rangeClass==='Open'?'green':(rangeClass==='Mix'?'amber':'red')}">${rangeClass}</span></div>
-          <div>PFR: ${preflopAggressor ?? 'n/a'}</div>
-          ${sizeLine}
-          <div class="muted" style="opacity:.85;margin-top:4px">Opening size rule: ${openSizeRuleFor(pos)}</div>
-        </div>
-      `);
+if (decision === "raise") {
+  if (!opener || heroIsOpener) {
+    // ===== HERO OPENING (×BB) =====
+    if (heroActions.preflop.sizeBb != null) {
+      const bbSel = heroActions.preflop.sizeBb;
+      const [min,max] = recommendedOpenSizeRangeBb(pos);
+      let evalStr = "Good";
+      if (bbSel < min)            evalStr = (bbSel >= (min - 0.3)) ? "Slightly small" : "Too small";
+      else if (bbSel > max)       evalStr = (bbSel <= (max + 0.5)) ? "Slightly large" : "Too large";
+      const advice = buildSizeAdvice(pos, bbSel, min, max);
+      sizingHtml =
+        `<div>Opening size: ${bbSel.toFixed(1)}x BB — <span class="badge ${sizeEvalBadgeColor(evalStr)}">${evalStr}</span></div>` +
+        (advice ? `<div style="opacity:.9">${advice}</div>` : "");
+    }
+  } else if (facingOpen && !facing3Bet) {
+    // ===== HERO 3‑BET vs single opener (× of open) =====
+    const openToBb = Number(ENGINE.preflop?.openToBb ?? 2.2);
+    let chosenMult = null;
+    if (heroActions.preflop.sizeMult != null) {
+      chosenMult = Number(heroActions.preflop.sizeMult);
+    } else if (heroActions.preflop.sizeBb != null && openToBb > 0) {
+      chosenMult = Number(heroActions.preflop.sizeBb) / openToBb;
+    }
+    if (chosenMult != null) {
+      const iHero  = ACTION_ORDER.indexOf(heroSeat);
+      const iOp    = ACTION_ORDER.indexOf(opener);
+      const heroIP = (iHero > iOp) && heroSeat !== 'SB' && heroSeat !== 'BB';
+      const rec = heroIP ? 3.0 : 4.0;
+      const diff = chosenMult - rec;
 
+      let evalStr = "Good";
+      if (Math.abs(diff) > 0.30)  evalStr = (Math.abs(diff) <= 0.60) ? (diff < 0 ? "Slightly small" : "Slightly large") : (diff < 0 ? "Too small" : "Too large");
+      const tip = heroIP ? "IP guideline ≈ ×3." : "OOP guideline ≈ ×4.";
+      const advice = heroIP
+        ? "In position, ~×3 keeps pressure without bloating the pot."
+        : "Out of position, ~×4 denies equity and avoids giving a great price.";
+
+      sizingHtml =
+        `<div>3‑Bet size: ×${chosenMult.toFixed(2)} of open — <span class="badge ${sizeEvalBadgeColor(evalStr)}">${evalStr}</span></div>` +
+        `<div style="opacity:.9">${tip} ${advice}</div>`;
+    }
+  }
+}
+
+// ---- Insert the preflop coaching block (no n/a lines, print only what applied) ----
+feedbackEl.insertAdjacentHTML('beforeend', `
+  <div style="margin-top:8px">
+    <strong>Preflop (6‑max ${pos}):</strong>
+    <div>Range check: <span class="badge ${rangeClass==='Open'?'green':(rangeClass==='Mix'?'amber':'red')}">${rangeClass}</span></div>
+    <div>PFR: ${preflopAggressor ?? 'n/a'}</div>
+    ${sizingHtml}
+    <div class="muted" style="opacity:.85;margin-top:4px">Opening size rule: ${openSizeRuleFor(pos)}</div>
+  </div>
+`);
       const last = handHistory[handHistory.length-1];
       if (last){
         last.heroPosition = pos;
@@ -3642,10 +4218,10 @@ if (stageNow === 'flop' || stageNow === 'turn' || stageNow === 'river') {
     const stageIsPost = (stage==='flop'||stage==='turn'||stage==='river');
 
     if (stageIsPost){
-      const actionLabel = determinePostflopAction(decision, toCall);
-      const betRaiseLabel = betOrRaiseLabelForStage();
+     const actionLabel = actionLabelPre;               // reuse the pre-action label
+     const betRaiseLabel = betOrRaiseLabelForStage();
+     heroActions[stage].action = actionLabel;
 
-      heroActions[stage].action = actionLabel;
       const catKey = mapBoardToCategory(boardCards, holeCards);
       let evalBlockHtml = '';
 
@@ -3789,10 +4365,23 @@ if (stageNow === 'flop' || stageNow === 'turn' || stageNow === 'river') {
     }
   } catch(e){ console.warn("Phase 3/4 coaching failed:", e); }
 
+// If villains bet behind our check, there is now a live price -> keep Submit visible for our response
+const lettingHeroRespondThisStreet =
+  (stageNow === 'flop' || stageNow === 'turn' || stageNow === 'river') &&
+  actionLabelPre === 'check' &&
+  toCall > 0;
+
+if (lettingHeroRespondThisStreet) {
+  submitStageBtn.classList.remove("hidden");
+  nextStageBtn.classList.add("hidden");
+  if (barSubmit) barSubmit.classList.remove("hidden");
+  if (barNext)   barNext.classList.add("hidden");
+} else {
   submitStageBtn.classList.add("hidden");
   nextStageBtn.classList.remove("hidden");
   if (barSubmit) barSubmit.classList.add("hidden");
-  if (barNext) barNext.classList.remove("hidden");
+  if (barNext)   barNext.classList.remove("hidden");
+}
 });
 nextStageBtn.addEventListener("click", ()=> advanceStage());
 
@@ -3979,7 +4568,7 @@ function downloadCsv(){
 
 // Villain reveal policy state
 const REVEAL = {
-  policy: 'always_remaining' // 'always_all' | 'showdown_only' | 'on_hero_fold' | 'always_remaining'
+  policy: 'always_all' // 'always_all' | 'showdown_only' | 'on_hero_fold' | 'always_remaining'
 };
 
 function createSettingsPanel(){
@@ -4136,7 +4725,7 @@ panel.insertBefore(row, applyRow);
 
 // Save villain reveal policy
 const rp = panel.querySelector('#set_reveal_policy');
-if (rp) REVEAL.policy = rp.value || 'always_remaining';
+if (rp) REVEAL.policy = rp.value || 'always_all';
 
     // NEW: apply blinds (always £5-rounded)
     const newSB = toStep5(parseFloat(panel.querySelector("#set_sb").value) || BLINDS.sb);
@@ -4264,25 +4853,33 @@ function setupPhase1UI(){
   if (rangeModalClose) rangeModalClose.addEventListener('click', ()=> closeRangeModal());
   if (rangeModalOverlay) rangeModalOverlay.addEventListener('click', (e)=>{ if (e.target===rangeModalOverlay) closeRangeModal(); });
 
-  if (sizePresetRow){
-    sizePresetRow.addEventListener('click', (e)=>{
-      const btn = e.target.closest('.size-bb'); if (!btn) return;
-      sizePresetRow.querySelectorAll('.pill').forEach(p=>p.classList.remove('active'));
-      btn.classList.add('active');
-      const val = parseFloat(btn.getAttribute('data-bb'));
-      heroActions.preflop.sizeBb = isFinite(val) ? val : null;
-    });
-  }
-
-  ["decFold","decCall","decRaise"].forEach(id=>{
-    const el=document.getElementById(id); if (!el) return;
-    el.addEventListener('change', ()=>{
-      const stage=STAGES[currentStageIndex];
-      const isPre=(stage==='preflop'); const isRaise=document.getElementById('decRaise')?.checked;
-      if (sizePresetRow) sizePresetRow.classList.toggle('hidden', !(isPre && isRaise));
-      if (sizePresetRowPost) sizePresetRowPost.classList.toggle('hidden', !(!isPre && isRaise));
-    });
+if (sizePresetRow){
+  sizePresetRow.addEventListener('click', (e)=>{
+    const btn = e.target.closest('.size-bb'); if (!btn) return;
+    sizePresetRow.querySelectorAll('.pill').forEach(p=>p.classList.remove('active'));
+    btn.classList.add('active');
+    const mult = parseFloat(btn.getAttribute('data-mult'));
+    const bb   = parseFloat(btn.getAttribute('data-bb'));
+    if (isFinite(mult)) {
+      heroActions.preflop.sizeMult = mult; // 3-bet basis (× of open)
+      heroActions.preflop.sizeBb   = null;
+    } else {
+      heroActions.preflop.sizeBb   = isFinite(bb) ? bb : null; // open basis (× BB)
+      heroActions.preflop.sizeMult = null;
+    }
   });
+}
+
+ ["decFold","decCall","decRaise"].forEach(id=>{
+  const el=document.getElementById(id); if (!el) return;
+  el.addEventListener('change', ()=>{
+    const stage=STAGES[currentStageIndex];
+    const isPre=(stage==='preflop'); const isRaise=document.getElementById('decRaise')?.checked;
+    if (sizePresetRow) sizePresetRow.classList.toggle('hidden', !(isPre && isRaise));
+    if (sizePresetRowPost) sizePresetRowPost.classList.toggle('hidden', !(!isPre && isRaise));
+    if (isPre && isRaise) updatePreflopSizePresets(); // NEW
+  });
+});
 }
 
 function setupPhase2UI(){
