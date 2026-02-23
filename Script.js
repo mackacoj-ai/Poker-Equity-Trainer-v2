@@ -30,6 +30,590 @@ const PERSONALITY_INFO = {
   MANIAC:  { label: "Maniac",                     how: "Very high VPIP & aggression; over‑bluffs.",                      spot: "Trap pre; induce; call down with good bluff‑catchers; avoid thin bluffs." }
 };
 
+// ===== Hand family helpers for archetype scaling =====
+function handCodeFamily(code) {
+  // 'AA', 'AKs', 'AQo', etc.
+  if (!code || typeof code !== 'string') return 'other';
+  const pair = /^[2-9TJQKA]\1$/.test(code);
+  if (pair) return 'pairs';
+  const suited = code.endsWith('s');
+  const offsuit = code.endsWith('o');
+  const hi = code[0], lo = code[1];
+
+  // Broadways set
+  const BW = new Set(["A","K","Q","J","T"]);
+  const isBW = BW.has(hi) && BW.has(lo);
+
+  if (suited && isBW) return 'suited_broadways';
+  if (offsuit && isBW) return 'offsuit_broadways';
+
+  // Ax families
+  if (hi === 'A' && suited) return 'suited_ax';
+  if (hi === 'A' && offsuit) return 'offsuit_ax';
+
+  // Connectors / gappers (rank index diff = 1 or 2, ignoring A-low edge cases)
+  const order = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"];
+  const iHi = order.indexOf(hi), iLo = order.indexOf(lo);
+  if (iHi >= 0 && iLo > iHi) {
+    const gap = (iLo - iHi) - 1; // e.g., KQ -> 0, KJ -> 1, KT -> 2
+    if (suited && gap === 0) return 'suited_connectors';
+    if (suited && gap === 1) return 'suited_one_gappers';
+  }
+
+  // Junk buckets
+  if (suited)  return 'suited_junk';
+  if (offsuit) return 'offsuit_junk';
+  return 'other';
+}
+
+// ===== Archetype numeric modifiers (multipliers applied to base weights) =====
+// 1.00 = neutral; >1 widen; <1 tighten.
+// Keep conservative to stay stable on mobile with modest trials.
+const ARCHETYPE_MODIFIERS = {
+  TAG: { // Tight-Aggressive baseline
+    pairs:1.05, suited_broadways:1.00, offsuit_broadways:0.95,
+    suited_ax:0.95, offsuit_ax:0.90,
+    suited_connectors:0.90, suited_one_gappers:0.88,
+    suited_junk:0.80, offsuit_junk:0.75, other:0.95
+  },
+  LAG: { // Loose-Aggressive widens suited/gappers
+    pairs:0.98, suited_broadways:1.08, offsuit_broadways:1.05,
+    suited_ax:1.10, offsuit_ax:1.00,
+    suited_connectors:1.25, suited_one_gappers:1.20,
+    suited_junk:1.15, offsuit_junk:1.10, other:1.05
+  },
+  STATION: { // Calls too much (widen junk/off-broadways)
+    pairs:1.00, suited_broadways:1.05, offsuit_broadways:1.12,
+    suited_ax:1.05, offsuit_ax:1.10,
+    suited_connectors:1.10, suited_one_gappers:1.05,
+    suited_junk:1.20, offsuit_junk:1.30, other:1.08
+  },
+  NIT: { // Very tight except premiums
+    pairs:1.12, suited_broadways:1.05, offsuit_broadways:0.80,
+    suited_ax:0.80, offsuit_ax:0.70,
+    suited_connectors:0.70, suited_one_gappers:0.65,
+    suited_junk:0.50, offsuit_junk:0.40, other:0.75
+  },
+  MANIAC: { // Very wide + aggro; keep preflop still plausible
+    pairs:0.95, suited_broadways:1.15, offsuit_broadways:1.20,
+    suited_ax:1.15, offsuit_ax:1.10,
+    suited_connectors:1.30, suited_one_gappers:1.30,
+    suited_junk:1.25, offsuit_junk:1.20, other:1.15
+  }
+};
+
+// Map seat -> archetype (falls back to TAG if undefined)
+function seatArchetype(seat) {
+  try {
+    const letter = LETTERS_BY_POSITION?.[seat];
+    const key = SESSION_PERSONA_BY_LETTER?.[letter]; // 'TAG','LAG','STATION','NIT','MANIAC'
+    return (ARCHETYPE_MODIFIERS[key]) ? key : 'TAG';
+  } catch(e){ return 'TAG'; }
+}
+
+// ===== Range → weight map utilities =====
+
+// 1) Convert class -> base numeric weight
+function classToWeight(cls){ // 'open'|'mix'|'fold'
+  if (cls === 'open') return 1.0;
+  if (cls === 'mix')  return 0.5;
+  return 0.0;
+}
+
+// 2) JSON frequency -> weight (fallback if you have numeric freq)
+function freqToWeight(freq){
+  if (freq == null) return 0.0;
+  const f = Number(freq);
+  if (!Number.isFinite(f)) return 0.0;
+  if (f >= 0.67) return 1.0;
+  if (f >= 0.15) return 0.5;
+  return 0.0;
+}
+
+// 3) Build code->class map for OPEN from your existing helpers/JSON
+function classMapOpenForSeat(seat){
+  // Prefer JSON open if present
+  try{
+    const buck = RANGES_JSON?.open?.[seat];
+    if (buck){
+      const m = new Map();
+      for (const [code, freq] of Object.entries(buck)){
+        const w = freqToWeight(freq);
+        m.set(code, (w >= 1.0 ? 'open' : (w >= 0.5 ? 'mix':'fold')));
+      }
+      return m;
+    }
+  }catch(e){}
+
+  // Fallback to your explicit/hybrid builder (already in your file)
+  try{
+    return getClassMapForSeat(seat); // returns Map<code,'open'|'mix'|'fold'>
+  }catch(e){}
+
+  return new Map();
+}
+
+// 4) Build code->class for 3-bet (seat vs opener), prefer JSON then hybrid tokens
+function classMap3Bet(seat, opener){
+  // JSON possible key: `${seat}_vs_${opener}`
+  try{
+    const key = `${seat}_vs_${opener}`;
+    const buck = RANGES_JSON?.three_bet?.[key];
+    if (buck){
+      const m = new Map();
+      for (const [code, freq] of Object.entries(buck)){
+        const w = freqToWeight(freq);
+        m.set(code, (w >= 1.0 ? 'open' : (w >= 0.5 ? 'mix':'fold')));
+      }
+      return m;
+    }
+  }catch(e){}
+
+  // Hybrid token fallback from your built-ins
+  try{
+    const lists = HYBRID_3BET_RANGES?.[seat]?.[opener] ?? null; // {open:[tokens], mix:[tokens]}
+    if (lists){
+      const openSet = new Set((lists.open ?? []).flatMap(expandToken));
+      const mixSet  = new Set((lists.mix  ?? []).flatMap(expandToken));
+      const m = new Map();
+      // Populate the 169 universe quickly:
+      for (let i=0;i<RANKS_ASC.length;i++){
+        for (let j=0;j<RANKS_ASC.length;j++){
+          let code;
+          if (i===j) code = RANKS_ASC[i]+RANKS_ASC[j];
+          else if (i<j){ code = RANKS_ASC[i]+RANKS_ASC[j]+'s'; }
+          else { code = RANKS_ASC[j]+RANKS_ASC[i]+'o'; }
+          if (openSet.has(code)) m.set(code,'open');
+          else if (mixSet.has(code)) m.set(code,'mix');
+          else m.set(code,'fold');
+        }
+      }
+      return m;
+    }
+  }catch(e){}
+
+  return new Map();
+}
+
+// 5) Build code->class for DEFEND/CALL (seat vs opener), prefer JSON then hybrid defend
+function classMapDefend(seat, opener){
+  // JSON BB defend uses defend[`BB_vs_${opener}`]; others may be vs_open key
+  try{
+    if (seat === 'BB'){
+      const key = `BB_vs_${opener}`;
+      const buck = RANGES_JSON?.defend?.[key];
+      if (buck){
+        const m = new Map();
+        for (const [code, freq] of Object.entries(buck)){
+          const w = freqToWeight(freq);
+          m.set(code, (w >= 1.0 ? 'open' : (w >= 0.5 ? 'mix':'fold')));
+        }
+        return m;
+      }
+    } else {
+      const key = `${seat}_vs_${opener}`;
+      const callObj = RANGES_JSON?.vs_open?.[key]?.call;
+      if (callObj){
+        const m = new Map();
+        for (const [code, freq] of Object.entries(callObj)){
+          const w = freqToWeight(freq);
+          m.set(code, (w >= 1.0 ? 'open' : (w >= 0.5 ? 'mix':'fold')));
+        }
+        return m;
+      }
+    }
+  }catch(e){}
+
+  // Hybrid defend fallback keyed by opener seat
+  try{
+    const lists = HYBRID_DEFEND_RANGES?.[opener] ?? null; // {open:[tokens], mix:[tokens]}
+    if (lists){
+      const openSet = new Set((lists.open ?? []).flatMap(expandToken));
+      const mixSet  = new Set((lists.mix  ?? []).flatMap(expandToken));
+      const m = new Map();
+      for (let i=0;i<RANKS_ASC.length;i++){
+        for (let j=0;j<RANKS_ASC.length;j++){
+          let code;
+          if (i===j) code = RANKS_ASC[i]+RANKS_ASC[j];
+          else if (i<j){ code = RANKS_ASC[i]+RANKS_ASC[j]+'s'; }
+          else { code = RANKS_ASC[j]+RANKS_ASC[i]+'o'; }
+          if (openSet.has(code)) m.set(code,'open');
+          else if (mixSet.has(code)) m.set(code,'mix');
+          else m.set(code,'fold');
+        }
+      }
+      return m;
+    }
+  }catch(e){}
+
+  return new Map();
+}
+
+// 6) Build a seat's PRE-FLOP code->weight map based on its role this hand
+function buildPreflopWeightMapForSeat(seat){
+  const role = (() => {
+    const op  = ENGINE?.preflop?.openerSeat ?? null;
+    const thb = ENGINE?.preflop?.threeBetterSeat ?? null;
+    const ccs = new Set(ENGINE?.preflop?.coldCallers ?? []);
+    if (seat === op)  return 'opener';
+    if (seat === thb) return 'three_better';
+    if (ccs.has(seat)) return 'cold_caller';
+    // unopened pot: use open map for the seat
+    return 'unopened';
+  })();
+
+  let classMap = new Map();
+  const opener = ENGINE?.preflop?.openerSeat ?? null;
+
+  if (role === 'opener' || role === 'unopened'){
+    classMap = classMapOpenForSeat(seat);
+  } else if (role === 'three_better'){
+    classMap = classMap3Bet(seat, opener);
+  } else if (role === 'cold_caller'){
+    classMap = classMapDefend(seat, opener);
+  }
+
+  // Convert class -> base weight
+  const base = new Map();
+  for (const [code, cls] of classMap.entries()) {
+    base.set(code, classToWeight(cls));
+  }
+
+  // Apply archetype multipliers by hand family
+  const archKey = seatArchetype(seat);
+  const mods = ARCHETYPE_MODIFIERS[archKey] ?? ARCHETYPE_MODIFIERS.TAG;
+  const out = new Map();
+  for (const [code, w] of base.entries()){
+    if (w <= 0) { out.set(code, 0); continue; }
+    const fam = handCodeFamily(code);
+    const mult = (mods[fam] ?? 1.0);
+    out.set(code, Math.max(0, w * mult));
+  }
+  return out;
+}
+
+// ===== Weighted sampler (code-level alias) + combo instantiation =====
+
+// Count available suit-combos for a code after blocking hero+board cards
+function availableComboCountForCode(code, blockedCards){
+  // pairs: 6 combos; suited non-pair: 4; offsuit non-pair: 12
+  // But remove any combos using blocked cards.
+  const combos = enumerateCombosForCode(code);
+  let cnt = 0;
+  for (const [c1,c2] of combos){
+    if (!containsCard(blockedCards, c1) && !containsCard(blockedCards, c2)) cnt++;
+  }
+  return cnt;
+}
+
+// Enumerate all 2-card combos for a given code (e.g., 'AKs','AKo','AA')
+function enumerateCombosForCode(code){
+  // Uses global SUITS and RANKS_ASC from your file
+  const r1 = code[0], r2 = code[1];
+  const suited = code.endsWith('s');
+  const offsuit = code.endsWith('o');
+  const pair = (r1 === r2);
+
+  const makeCard = (rank,suit) => ({ rank, suit });
+
+  const res = [];
+  if (pair){
+    // Choose any 2 distinct suits out of 4: 6 combos
+    for (let i=0;i<SUITS.length;i++){
+      for (let j=i+1;j<SUITS.length;j++){
+        res.push([ makeCard(r1, SUITS[i]), makeCard(r1, SUITS[j]) ]);
+      }
+    }
+    return res;
+  }
+  if (suited){
+    // Same suit: 4 combos
+    for (let s=0;s<SUITS.length;s++){
+      res.push([ makeCard(r1, SUITS[s]), makeCard(r2, SUITS[s]) ]);
+    }
+    return res;
+  }
+  // Offsuit distinct suits: 12 combos
+  for (let sa=0; sa<SUITS.length; sa++){
+    for (let sb=0; sb<SUITS.length; sb++){
+      if (sa === sb) continue;
+      res.push([ makeCard(r1, SUITS[sa]), makeCard(r2, SUITS[sb]) ]);
+    }
+  }
+  return res;
+}
+
+// Simple alias table for codes
+function buildAliasTable(codeWeightsMap, blockedCards){
+  // Build arrays of codes and adjusted weights = baseWeight * availableCombos
+  const codes = [];
+  const weights = [];
+  for (const [code, w] of codeWeightsMap.entries()){
+    if (w <= 0) continue;
+    const count = availableComboCountForCode(code, blockedCards);
+    if (count <= 0) continue;
+    codes.push(code);
+    weights.push(w * count);
+  }
+  if (codes.length === 0) return null;
+
+  // Normalize
+  const total = weights.reduce((a,b)=>a+b,0);
+  const probs = weights.map(w=>w/Math.max(1e-12,total));
+
+  // Vose alias setup
+  const n = probs.length;
+  const scaled = probs.map(p => p * n);
+  const small = [], large = [];
+  const alias = new Array(n).fill(0);
+  const prob  = new Array(n).fill(0);
+
+  for (let i=0;i<n;i++) (scaled[i] < 1 ? small : large).push(i);
+  while (small.length && large.length){
+    const l = small.pop(), g = large.pop();
+    prob[l] = scaled[l];
+    alias[l] = g;
+    scaled[g] = (scaled[g] + scaled[l]) - 1;
+    (scaled[g] < 1 ? small : large).push(g);
+  }
+  while (large.length){ prob[large.pop()] = 1; }
+  while (small.length){ prob[small.pop()] = 1; }
+
+  return { codes, prob, alias };
+}
+
+function aliasPick(tbl){
+  const n = tbl.prob.length;
+  const i = Math.floor(Math.random()*n);
+  const u = Math.random();
+  return (u < tbl.prob[i]) ? tbl.codes[i] : tbl.codes[tbl.alias[i]];
+}
+
+// Pick a concrete 2-card combo for a code, avoiding collisions with 'used' cards
+function pickComboForCode(code, usedCards){
+  const combos = enumerateCombosForCode(code);
+  // Shuffle small array for fairness
+  for (let i=combos.length-1;i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [combos[i], combos[j]] = [combos[j], combos[i]];
+  }
+  for (const [c1,c2] of combos){
+    if (!containsCard(usedCards, c1) && !containsCard(usedCards, c2)){
+      return [c1,c2];
+    }
+  }
+  return null;
+}
+
+// ===== New range-aware Monte Carlo equity engine =====
+
+// Determine street from board length
+function streetFromBoardLen(n){ return (n===0?'preflop':(n===3?'flop':(n===4?'turn':'river'))); }
+
+// Live villain seats for this board (preflop uses participants when available)
+function liveVillainSeats(board){
+  const hero = currentPosition();
+  const n = board.length;
+  if (n === 0){
+    const parts = ENGINE?.preflop?.participants ?? [];
+    const seats = parts.filter(s => s !== hero);
+    if (seats.length > 0) return seats;
+    // Fallback: pick next seat in order (one opponent) to avoid 5-way bias
+    const order = ["UTG","HJ","CO","BTN","SB","BB"];
+    const iHero = order.indexOf(hero);
+    for (let k=1;k<order.length;k++){
+      const s = order[(iHero+k) % order.length];
+      if (s !== hero) return [s];
+    }
+    return ["BB"];
+  }
+  // Flop/turn/river: use survivors set (exclude hero)
+  try{
+    if (ENGINE.lastStreetComputed !== streetFromBoardLen(n)){
+      engineRecomputeSurvivorsForStreet(board); // keep in sync
+    }
+  }catch(e){}
+  const inSet = new Set(ENGINE?.survivors ?? []);
+  const out = [...inSet].filter(s => s !== hero);
+  return (out.length ? out : ["BB"]);
+}
+
+// Build per-seat alias tables once per street
+function buildSeatAliases(board){
+  const blocked = [...board, ...holeCards]; // hero+board blocked
+  const seats = liveVillainSeats(board);
+  const aliasBySeat = {};
+  const weightMapBySeat = {};
+  for (const seat of seats){
+  let wm = buildPreflopWeightMapForSeat(seat); // role-aware preflop
+
+// --- NEW: post-flop narrowing ---
+if (board.length >= 3){
+  wm = narrowPostflopWeights(wm, holeCards, board);
+}
+
+// Build alias table
+const tbl = buildAliasTable(wm, blocked);
+    if (tbl && tbl.codes.length){
+      aliasBySeat[seat] = tbl;
+      weightMapBySeat[seat] = wm;
+    }
+  }
+  return { seats, aliasBySeat, weightMapBySeat };
+}
+
+// Sample one concrete villain hand for a seat
+function sampleSeatHand(seat, tbl, used, debugSamples){
+  if (!tbl) return null;
+  const MAX_TRIES = 40;
+  for (let t=0;t<MAX_TRIES;t++){
+  const code = aliasPick(tbl);
+// Debug stats
+if (SHOW_SAMPLER_DEBUG){
+    if (!debugSamples[seat]) debugSamples[seat] = {};
+    debugSamples[seat][code] = (debugSamples[seat][code] ?? 0) + 1;
+}
+
+const picked = pickComboForCode(code, used);
+    if (picked){
+      return picked;
+    }
+  }
+  return null;
+}
+
+function newEquityEngineCompute(hole, board){
+
+// Track how often each code is sampled per seat
+  const debugSamples = {};  
+  const stage = streetFromBoardLen(board.length);
+  const trialsPreset = SETTINGS?.trialsByStage?.[stage] ?? 4000;
+  const trials = Math.max(250, trialsPreset); // keep a sane floor
+
+  let wins=0, ties=0, losses=0, equityAcc=0;
+  const catCount = new Map();
+  const { seats, aliasBySeat } = buildSeatAliases(board);
+
+  for (let t=0; t<trials; t++){
+    // Build used set per iteration
+    const used = [...hole, ...board];
+
+    // 1) Sample each live villain
+    const villains = [];
+    for (const seat of seats){
+      const tbl = aliasBySeat[seat];
+      const vh = sampleSeatHand(seat, tbl, used, debugSamples);
+      if (vh){
+        villains.push(vh);
+        used.push(vh[0], vh[1]);
+      }
+    }
+    if (villains.length === 0){
+      // Keep at least one opponent for training feedback
+      // Fallback: random two cards from remaining deck
+      const simDeck = createDeck().filter(c => !containsCard(used, c));
+      if (simDeck.length >= 2){
+        const i = Math.floor(Math.random()*simDeck.length);
+        let j = Math.floor(Math.random()*simDeck.length);
+        if (j===i) j = (j+1)%simDeck.length;
+        villains.push([simDeck[i], simDeck[j]]);
+        used.push(simDeck[i], simDeck[j]);
+      }
+    }
+
+    // 2) Complete the board uniformly
+    const rest = createDeck().filter(c => !containsCard(used, c));
+    const need = 5 - board.length;
+    const simBoard = [...board];
+    for (let k=0;k<need;k++){
+      const idx = Math.floor(Math.random()*rest.length);
+      simBoard.push(rest.splice(idx,1)[0]);
+    }
+
+    // 3) Evaluate
+    const heroScore = evaluate7(hole, simBoard);
+    let better=0, equal=0;
+    for (const v of villains){
+      const vs = evaluate7(v, simBoard);
+      const cmp = compareScores(heroScore, vs);
+      if (cmp < 0) better++;
+      else if (cmp === 0) equal++;
+    }
+
+    if (better > 0) { losses++; }
+    else if (equal > 0) { ties++; equityAcc += 1/(equal+1); }
+    else { wins++; equityAcc += 1; }
+
+    // Track hero's category distribution (optional UI)
+    const name = CAT_NAME[heroScore.cat] ?? 'High Card';
+    catCount.set(name, (catCount.get(name) ?? 0) + 1);
+  }
+
+  const catBreakdown = [];
+  for (const [k,v] of catCount.entries()){
+    catBreakdown.push({ name:k, pct:(v/trials)*100 });
+  }
+  // Keep same sort order you use today
+  const catOrder = ['Straight Flush','Four of a Kind','Full House','Flush','Straight','Three of a Kind','Two Pair','One Pair','High Card'];
+  catBreakdown.sort((a,b)=> {
+    const oi = catOrder.indexOf(a.name)-catOrder.indexOf(b.name);
+    return (oi!==0?oi:(b.pct-a.pct));
+  });
+
+  const equity = (equityAcc/trials)*100;
+
+if (SHOW_SAMPLER_DEBUG){
+  console.group("Sampler Debug — Top 10 Codes per Seat");
+  for (const seat of Object.keys(debugSamples)){
+    const entries = Object.entries(debugSamples[seat])
+      .sort((a,b)=>b[1]-a[1])
+      .slice(0,10);
+    console.log(seat, entries);
+  }
+  console.groupEnd();
+}
+  return {
+    equity,
+    winPct: (wins/trials)*100,
+    tiePct: (ties/trials)*100,
+    losePct:(losses/trials)*100,
+    trials,
+    catBreakdown,
+    numOpp: Math.max(1, seats.length)
+  };
+}
+
+// ===== Post-flop range narrowing =====
+// Remove weight from hands that are extremely unlikely to continue
+// given the board texture (cheap, mobile-safe narrowing).
+function narrowPostflopWeights(weightMap, hole, board){
+  const tex = analyzeBoard(board, hole); 
+  // detectStraightDrawFromAllCards(...) also available
+  const { openEnder, gutshot } = detectStraightDrawFromAllCards([...hole, ...board]);
+
+  // Keep families that plausibly continue:
+  const keepFamilies = new Set();
+  keepFamilies.add('pairs');
+  keepFamilies.add('suited_broadways');
+  keepFamilies.add('offsuit_broadways');
+  keepFamilies.add('suited_ax'); 
+  if (openEnder) keepFamilies.add('suited_connectors');
+  if (gutshot && tex.moistureBucket !== 'Dry') keepFamilies.add('suited_one_gappers');
+  if (tex.paired) keepFamilies.add('pairs');
+
+  const newMap = new Map();
+  for (const [code, w] of weightMap.entries()){
+    if (w <= 0){ newMap.set(code, 0); continue; }
+    const fam = handCodeFamily(code);
+    if (!keepFamilies.has(fam)){
+      newMap.set(code, w * 0.25);  // softly trim unlikely hands
+    } else {
+      newMap.set(code, w);
+    }
+  }
+  return newMap;
+}
+
 // Session-scoped state
 let SESSION_PERSONA_BY_LETTER = null;  // e.g., { A:'TAG', B:'STATION', ... } (villains only)
 let LETTERS_BY_POSITION = null;        // e.g., { UTG:'A', HJ:'H', CO:'C', BTN:'E', SB:'B', BB:'D' }
@@ -312,6 +896,13 @@ const barNext = document.getElementById("barNextBtn");
 
 const hintDetails = document.getElementById("hintDetails");
 const hintsDetailBody = document.getElementById("hintsDetailBody");
+
+// ===== Advanced Toggle for Sampler Debug =====
+let SHOW_SAMPLER_DEBUG = false;
+document.getElementById('advToggleSampler')?.addEventListener('change', e=>{
+  SHOW_SAMPLER_DEBUG = e.target.checked;
+});
+
 
 // ==================== Cards & deck ====================
 const SUITS = ["\u2660", "\u2665", "\u2666", "\u2663"]; // ♠ ♥ ♦ ♣
@@ -945,36 +1536,16 @@ const TRIALS_PRESETS = {
   Balanced: { preflop: 4000, flop: 6000, turn: 8000, river: 12000 },
   Accurate: { preflop: 8000, flop: 12000, turn: 16000, river: 20000 }
 };
+
+// ===== Feature flags =====
+const FEATURE_FLAGS = {
+  // Route computeEquityStats(...) through the new range-aware MC engine
+  // (can flip to false to revert to legacy in one line)
+  equityEngineV2: true
+};
+
 function popRandomCard(arr){ const i=Math.floor(Math.random()*arr.length); return arr.splice(i,1)[0]; }
-function preflopWeight(c1,c2){
-  const v1=RANK_TO_VAL[c1.rank], v2=RANK_TO_VAL[c2.rank];
-  const hi=Math.max(v1,v2), lo=Math.min(v1,v2);
-  let score=0;
-  if (hi>=12) score+=1.0;
-  if (lo>=11) score+=0.7; else if (lo>=10) score+=0.5;
-  if (v1===v2){ score+=0.9; if (hi>=10) score+=0.1; }
-  if (c1.suit===c2.suit) score+=0.25;
-  const gap = Math.abs(v1-v2);
-  if (gap===1) score+=0.15; else if (gap===2) score+=0.07;
-  const maxScore=3.0, base=0.05;
-  return Math.min(1, base + (score/maxScore)*(1-base));
-}
-function drawBiasedOpponentHand(d){
-  const maxTries=200;
-  for (let t=0;t<maxTries;t++){
-    const i = Math.floor(Math.random()*d.length);
-    let j = Math.floor(Math.random()*d.length);
-    if (j===i) continue;
-    const c1=d[i], c2=d[j];
-    if (Math.random()<=preflopWeight(c1,c2)){
-      const hi=Math.max(i,j), lo=Math.min(i,j);
-      const second = d.splice(hi,1)[0];
-      const first = d.splice(lo,1)[0];
-      return [first,second];
-    }
-  }
-  return [popRandomCard(d), popRandomCard(d)];
-}
+
 
 // ==================== Postflop Engine v1 (deterministic survivors) ====================
 // Keeps villain cards fixed (TABLE.seats) and decides who continues on each street.
@@ -1218,71 +1789,12 @@ function villainConnected(hole, boardAtStreet){
   return pairWithBoard || hasFD || oesd;
 }
 
-function sampleShowdownOpponents(baselineCount /*, board, maybeOppHands, maybeDeck */){
-  // Deterministic: include all baseline opponents; no stochastic continuation.
-  // (computeEquityStats() already sizes baselineCount from remaining players.)
-  return Array.from({length: Math.max(0, baselineCount)}, (_, i) => i);
-}
 
+// TRAINING MODE: compute equity via new range-aware engine
+// V2‑ONLY: permanent range‑aware Monte Carlo engine
 
-function computeEquityStatsLegacy(hole, board, numOppOverride = null){
-  const stage = stageFromBoard(board);
-  const trials = SETTINGS.trialsByStage[stage] ?? 4000;
-
-  // Use override if provided, otherwise fall back to baseline
-  const BASE_OPP = (numOppOverride != null ? Math.max(0, numOppOverride) : SETTINGS.sim.playersBaseline);
-
-  let wins=0, ties=0, losses=0; let equityAcc=0;
-  const catCount = new Map();
-
-  for (let t=0;t<trials;t++){
-    const simDeck = createDeck().filter(c => !containsCard(hole,c) && !containsCard(board,c));
-    const opponents = [];
-    for (let i=0;i<BASE_OPP;i++) opponents.push(drawBiasedOpponentHand(simDeck));
-
-    const survivorsIdx = sampleShowdownOpponents(BASE_OPP, board, opponents, simDeck);
-    const survivors = survivorsIdx.map(i => opponents[i]);
-    if (survivors.length===0 && BASE_OPP>0) survivors.push(opponents[0]);
-
-    const need = 5-board.length;
-    const simBoard = [...board];
-    for (let i=0;i<need;i++) simBoard.push(popRandomCard(simDeck));
-
-    const heroScore = evaluate7(hole, simBoard);
-    let better=0, equal=0;
-    for (let i=0;i<survivors.length;i++){
-      const villainScore = evaluate7(survivors[i], simBoard);
-      const cmp = compareScores(heroScore, villainScore);
-      if (cmp<0) better++;
-      else if (cmp===0) equal++;
-    }
-    if (better>0) losses++;
-    else if (equal>0){ ties++; equityAcc += 1/(equal+1); }
-    else { wins++; equityAcc += 1; }
-
-    const cat = CAT_NAME[heroScore.cat];
-    catCount.set(cat, (catCount.get(cat)??0)+1);
-  }
-
-  const winPct = (wins/trials)*100, tiePct=(ties/trials)*100, losePct=(losses/trials)*100;
-  const equity = (equityAcc/trials)*100;
-  const catBreakdown=[];
-  for (const [k,v] of catCount.entries()) catBreakdown.push({ name:k, pct:(v/trials)*100 });
-  const catOrder = ['Straight Flush','Four of a Kind','Full House','Flush','Straight','Three of a Kind','Two Pair','One Pair','High Card'];
-  catBreakdown.sort((a,b)=>{ const oi = catOrder.indexOf(a.name)-catOrder.indexOf(b.name); return oi!==0?oi:(b.pct-a.pct); });
-  return { equity, winPct, tiePct, losePct, trials, catBreakdown, numOpp: Math.max(1, BASE_OPP) }; 
-}
-
-// TRAINING MODE: always compute equity vs random opponents,
-// but size the field to match how many players are still in.
-// We DO NOT look at (or remove) villains' actual hole cards here.
 function computeEquityStats(hole, board){
-  let numOpp = countOpponentsInPlay(board);  // from engine/discs, not hole cards
-  if (numOpp === 0) {
-    // For training, keep at least 1 opponent so equities remain meaningful pre-showdown
-    numOpp = 1;
-  }
-  return computeEquityStatsLegacy(hole, board, numOpp);
+    return newEquityEngineCompute(hole, board);
 }
 
 // ==================== Scoring & decisions ====================
@@ -2410,6 +2922,14 @@ const defendToggle = () => document.getElementById('defendToggle');
 const opener = ENGINE.preflop?.openerSeat ?? null;
 const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
 
+// Ensure we have a badge classification available in this scope
+let badgeRec = null;
+try {
+  badgeRec = classifyHeroPreflopBadge(); // { kind, band, src }
+} catch (e) {
+  badgeRec = null;
+}
+
 let initialMode = 'open';
 let initialDefendSub = 'call';
 
@@ -2420,7 +2940,7 @@ if (threeBetter) {
   if (vsSel) { vsSel.disabled = false; vsSel.value = threeBetter; }
 } else if (opener) {
   initialMode = 'defend';
-  initialDefendSub = (badgeRec.kind === '3-Bet') ? 'three_bet' : 'call';
+  initialDefendSub = (badgeRec && badgeRec.kind === '3-Bet') ? 'three_bet' : 'call';
   if (vsSel) { vsSel.disabled = false; vsSel.value = opener; }
 }
 
@@ -4613,6 +5133,14 @@ function createSettingsPanel(){
 
       <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
 
+<!-- Advanced panel toggle -->
+<div style="margin-top:12px;">
+  <label>
+    <input type="checkbox" id="advToggleSampler" />
+    Show advanced sampler diagnostics
+  </label>
+</div>
+
 
 <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
 <label>Villain reveal</label>
@@ -4677,6 +5205,15 @@ resetBtn.addEventListener('click', () => {
 
 row.appendChild(resetBtn);
 row.appendChild(hint);
+
+// ---- Attach sampler debug listener NOW that the element exists ----
+const adv = panel.querySelector('#advToggleSampler');
+if (adv) {
+    adv.addEventListener('change', e => {
+        SHOW_SAMPLER_DEBUG = e.target.checked;
+        console.log("Sampler debug =", SHOW_SAMPLER_DEBUG);
+    });
+}
 
 // --- Insert Reset Personalities BEFORE the Apply button row ---
 const applyRow = panel.querySelector('div[style*="justify-content:flex-end"]');
