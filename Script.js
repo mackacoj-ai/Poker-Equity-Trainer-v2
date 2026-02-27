@@ -1624,21 +1624,32 @@ function forSeatsAfterHero(heroSeat){
 }
 
 // --- Shared string label for UI coaching ---
-function buildPreflopLabel(openerSeat, openToBb, threeBetterSeat, threeBetToBb, coldCallers){
-  if (openerSeat && threeBetterSeat){
-    return `${openerSeat} opened ${openToBb?.toFixed?.(1) ?? '—'}x · ${threeBetterSeat} 3‑bet ${threeBetToBb?.toFixed?.(1) ?? '—'}x`;
+function buildPreflopLabel(openerSeat, openToBb, threeBetterSeat, threeBetToBb, coldCallers) {
+  // Backfill opener size if seat exists but value is missing
+  const safeOpenToBb = (openerSeat && openToBb == null)
+    ? Number(standardOpenSizeBb(openerSeat))
+    : Number(openToBb);
+
+  if (openerSeat && threeBetterSeat) {
+    const openX  = Number.isFinite(safeOpenToBb)   ? safeOpenToBb.toFixed(1) : "—";
+    const threeX = Number.isFinite(threeBetToBb)   ? Number(threeBetToBb).toFixed(1) : "—";
+    return `${openerSeat} opened ${openX}x · ${threeBetterSeat} 3-bet ${threeX}x`;
   }
-  if (openerSeat){
-    const cc = (Array.isArray(coldCallers) && coldCallers.length) ? ' · cold call' : '';
-    return `${openerSeat} opened ${openToBb?.toFixed?.(1) ?? '—'}x${cc}`;
+
+  if (openerSeat) {
+    const openX = Number.isFinite(safeOpenToBb) ? safeOpenToBb.toFixed(1) : "—";
+    const cc    = (Array.isArray(coldCallers) && coldCallers.length) ? " · cold call" : "";
+    return `${openerSeat} opened ${openX}x${cc}`;
   }
-  return 'Preflop';
+
+  return "Preflop";
 }
 
 // --- NEW: Pre‑flop simulate BEFORE hero (pure JSON) ---
 function preflopSimulateBeforeHero(){
   const heroSeat = currentPosition();
   const sb = toStep5(BLINDS.sb), bb = toStep5(BLINDS.bb);
+
   let potLocal = toStep5(sb + bb);
   let openerSeat = null, openToBb = null;
   let threeBetterSeat = null, threeBetToBb = null;
@@ -1652,7 +1663,7 @@ function preflopSimulateBeforeHero(){
     if (!h || !h.length) { ENGINE.statusBySeat[s] = "folded_now"; continue; }
     const code = handToCode(h);
 
-    // No opener yet → seat may open (use canOpen → JSON or explicit/hybrid)
+    // No opener yet → seat may open (JSON/explicit/hybrid via canOpen)
     if (!openerSeat){
       if (canOpen(s, code)){
         openerSeat = s;
@@ -1665,7 +1676,7 @@ function preflopSimulateBeforeHero(){
       continue;
     }
 
-    // opener exists, no 3-bettor yet → 3-bet or flat using hybrid-aware helpers
+    // opener exists, no 3-bettor yet → (JSON/hybrid) 3-bet first; else call; else fold
     if (!threeBetterSeat){
       if (inThreeBetBucket(s, openerSeat, code)){
         threeBetterSeat = s;
@@ -1682,7 +1693,7 @@ function preflopSimulateBeforeHero(){
       continue;
     }
 
-    // opener + 3-bettor already exist → allow flats vs 3-bet using hybrid-aware helper
+    // opener + 3-bettor already exist → allow flats vs 3-bet
     if (inCallBucket(s, openerSeat, code)){
       const rTo = toStep5(threeBetToBb * bb);
       potLocal = contributeCallTo(potLocal, rTo, s);
@@ -1706,12 +1717,14 @@ function preflopSimulateBeforeHero(){
   }
 
   // Record preflop context
-  ENGINE.preflop.openerSeat     = openerSeat ?? null;
-  ENGINE.preflop.threeBetterSeat= threeBetterSeat ?? null;
-  ENGINE.preflop.coldCallers    = Array.from(new Set(coldCallers));
-  ENGINE.preflop.openToBb       = (openToBb == null ? null : Number(openToBb));
-  ENGINE.preflop.threeBetToBb   = (threeBetToBb == null ? null : Number(threeBetToBb));
-  ENGINE.preflop.participants   = (() => {
+  ENGINE.preflop.openerSeat   = openerSeat ?? null;
+  ENGINE.preflop.threeBetterSeat = threeBetterSeat ?? null;
+  ENGINE.preflop.coldCallers  = Array.from(new Set(coldCallers));
+  ENGINE.preflop.openToBb     = (openToBb == null ? null : Number(openToBb));
+  ENGINE.preflop.threeBetToBb = (threeBetToBb == null ? null : Number(threeBetToBb));
+
+  // Participants (villain side so far)
+  ENGINE.preflop.participants = (() => {
     const p = new Set();
     if (openerSeat) p.add(openerSeat);
     if (threeBetterSeat) p.add(threeBetterSeat);
@@ -1722,8 +1735,6 @@ function preflopSimulateBeforeHero(){
   const label = buildPreflopLabel(openerSeat, openToBb, threeBetterSeat, threeBetToBb, coldCallers);
   return { potLocal, toCallLocal, openerSeat, openToBb, threeBetterSeat, threeBetToBb, coldCallers, label };
 }
-
-
 // --- LAST‑AGGRESSOR policy (no cycling) ---
 // We DO NOT wrap back around the table. After Hero acts, we scan seats AFTER Hero.
 // If a NEW aggressor appears after Hero, we allow seats after them to respond once, then end.
@@ -1742,14 +1753,14 @@ function preflopResolveAfterHero(decision){
     ENGINE.preflop.participants = Array.from(new Set([...(ENGINE.preflop.participants ?? []), seat]));
   }
 
-  // Track last aggressor before hero
   let lastAggressor = threeBetter ?? opener ?? null;
 
-  // Special: if Hero 4-bet over an existing 3-bet (villain), resolve one defender decision and end
+  // === If Hero 4-bet into a villain 3-bet, resolve one decision and end
   if (decision === 'raise' && opener && threeBetter && threeBetter !== hero){
     const h = seatHand(threeBetter);
     const code = h ? handToCode(h) : null;
     const canDefend4b = code ? inThreeBetBucket(threeBetter, opener, code) : false;
+
     const threeTo = toStep5((threeBetToBb ?? ((openToBb ?? 2.2) * ((idxOfSeat(threeBetter)>idxOfSeat(opener)) ? 3.0 : 4.0))) * bb);
     const heroMult = (heroActions?.preflop?.sizeMult != null) ? Number(heroActions.preflop.sizeMult) : 2.4;
     const fourTo = toStep5(heroMult * (threeTo / bb) * bb);
@@ -1757,19 +1768,21 @@ function preflopResolveAfterHero(decision){
     if (canDefend4b){
       pot = contributeCallTo(pot, fourTo, threeBetter);
       keepIn(threeBetter); noteParticipant(threeBetter);
+      scenario = { label: `${opener} opened ${(openToBb??standardOpenSizeBb(opener)).toFixed?.(1) ?? '—'}x · ${threeBetter} 3‑bet · Hero 4‑bet`, potFactor: 0 };
     } else {
       ENGINE.statusBySeat[threeBetter] = "folded_now";
+      scenario = { label: `${opener} opened ${(openToBb??standardOpenSizeBb(opener)).toFixed?.(1) ?? '—'}x · ${threeBetter} 3‑bet · Hero 4‑bet (fold)`, potFactor: 0 };
     }
     toCall = 0; updatePotInfo();
-    scenario = { label: `${opener} opened ${openToBb?.toFixed?.(1) ?? '—'}x · ${threeBetter} 3‑bet · Hero 4‑bet`, potFactor: 0 };
     return;
   }
 
-  // Seats after Hero, single pass, no wrap
+  // === Seats after Hero (single pass, no wrap)
   const tail = forSeatsAfterHero(hero);
   let needsPriorAggressorResolve = false;
   let priorAggressorToResolve = null;
 
+  // Running "raise-to" for tail seats
   let currentPriceTo = 0;
   if (opener && threeBetter){
     currentPriceTo = toStep5((threeBetToBb ?? 0) * bb);
@@ -1785,7 +1798,7 @@ function preflopResolveAfterHero(decision){
     if (!h || !h.length) { ENGINE.statusBySeat[s] = "folded_now"; continue; }
     const code = handToCode(h);
 
-    // No opener yet (Hero may have limped/checked) — allow opens after Hero
+    // No opener yet → allow opens after Hero
     if (!opener){
       if (canOpen(s, code)){
         opener = s; lastAggressor = s;
@@ -1801,13 +1814,14 @@ function preflopResolveAfterHero(decision){
       continue;
     }
 
-    // Opener exists, no 3-bettor yet → 3-bet (squeeze) or call (hybrid-aware)
+    // Opener exists, no 3-bettor yet → possible 3-bet or call
     if (opener && !threeBetter){
       if (inThreeBetBucket(s, opener, code)){
         threeBetter = s; lastAggressor = s;
         threeBetToBb = threeBetSizeBb(opener, s, openToBb);
         const rTo = toStep5(threeBetToBb * bb);
         pot = contributeRaiseTo(pot, rTo, s);
+        // Tentative label for now; will be final if they don't fold later
         scenario = { label: `${opener} opened ${openToBb.toFixed(1)}x · ${s} 3‑bet ${threeBetToBb.toFixed(1)}x`, potFactor: 0 };
         needsPriorAggressorResolve = true; priorAggressorToResolve = opener;
         currentPriceTo = rTo;
@@ -1822,7 +1836,7 @@ function preflopResolveAfterHero(decision){
       continue;
     }
 
-    // Opener + 3-bettor exist → tail seats can flat vs 3-bet (no 4-bets by villains here)
+    // Opener + 3-bettor exist → allow flats vs 3-bet
     if (opener && threeBetter){
       if (inCallBucket(s, opener, code)){
         const rTo = toStep5(threeBetToBb * bb);
@@ -1835,28 +1849,34 @@ function preflopResolveAfterHero(decision){
     }
   }
 
-  // Resolve one decision for the prior aggressor after a squeeze
+  // If a squeeze occurred, resolve opener once; if they fold, update label accordingly
   if (needsPriorAggressorResolve && priorAggressorToResolve){
     const s = priorAggressorToResolve;
     const h = seatHand(s);
     const code = h ? handToCode(h) : null;
     const canDefend = code ? (inThreeBetBucket(s, opener, code) || inCallBucket(s, opener, code)) : false;
+
     if (canDefend){
       const rTo = toStep5(threeBetToBb * bb);
       pot = contributeCallTo(pot, rTo, s);
       keepIn(s); noteParticipant(s);
+      // keep prior 3-bet label (they continued)
     } else {
       ENGINE.statusBySeat[s] = "folded_now";
+      // Overwrite any earlier "3-bet" wording to reflect the fold to the squeeze
+      scenario = { label: `${opener} opened ${openToBb.toFixed(1)}x · ${threeBetter} 3‑bet ${threeBetToBb.toFixed(1)}x · opener folded`, potFactor: 0 };
     }
   }
 
   // End preflop with no price for Hero
   toCall = 0; updatePotInfo();
 
+  // Include hero among preflop participants if hero didn’t fold
   const finalP = new Set(ENGINE.preflop.participants ?? []);
   if (!handHistory.some(h => h.stage === 'preflop' && h.decision === 'fold')) finalP.add(hero);
   ENGINE.preflop.participants = Array.from(finalP);
 }
+
 
 // ==================== END — Preflop Engine (JSON‑driven) ====================
 
@@ -2017,16 +2037,23 @@ function countOpponentsInPlay(board){
 
 // Small hook from Phase 1 to remember opener / 3-bettor
 function engineSetPreflopContext(openerSeat, threeBetterSeat, coldCallers, openToBb){
-  ENGINE.preflop.openerSeat = openerSeat ?? null;
+  // Backfill opener size if seat exists but size is missing
+  const backfillOpenToBb = (openerSeat && (openToBb == null))
+    ? Number(standardOpenSizeBb(openerSeat))
+    : (openToBb == null ? null : Number(openToBb));
+
+  ENGINE.preflop.openerSeat   = openerSeat ?? null;
   ENGINE.preflop.threeBetterSeat = threeBetterSeat ?? null;
-  ENGINE.preflop.coldCallers = Array.isArray(coldCallers) ? coldCallers.slice() : [];
-  ENGINE.preflop.openToBb = (openToBb == null ? null : Number(openToBb)); // NEW: opener raise-to (in BB)
+  ENGINE.preflop.coldCallers  = Array.isArray(coldCallers) ? coldCallers.slice() : [];
+  ENGINE.preflop.openToBb     = backfillOpenToBb; // ensure size present with opener
+
   // Keep a flat list of preflop participants — used if the hand ends preflop
   const parts = [];
   if (ENGINE.preflop.openerSeat) parts.push(ENGINE.preflop.openerSeat);
   if (ENGINE.preflop.threeBetterSeat) parts.push(ENGINE.preflop.threeBetterSeat);
   (ENGINE.preflop.coldCallers ?? []).forEach(s => parts.push(s));
   ENGINE.preflop.participants = [...new Set(parts)];
+
   ENGINE.survivors.clear();
   ENGINE.survivorsByStreet = { flop: [], turn: [], river: [] };
   ENGINE.lastStreetComputed = 'preflop';
@@ -4167,12 +4194,21 @@ Object.keys(ENGINE.statusBySeat).forEach(seat => {
   if (currentStageIndex >= STAGES.length){ endHand(); return; }
   const stage = STAGES[currentStageIndex];
 
+// Safety: if hero is the opener or three-bettor, force PFR attribution to hero
+if (stage === "flop") {
+  const hero = currentPosition();
+  if (ENGINE.preflop.openerSeat === hero || ENGINE.preflop.threeBetterSeat === hero) {
+    preflopAggressor = 'hero';
+  }
+}
+
   // --- Equity Swing: compute prev equity on previous board snapshot (include preflop) ---
 const prevBoard = [...boardCards];
 let prevEquity = null;
 try {
   prevEquity = computeEquityStats(holeCards, prevBoard).equity;
 } catch (e) { /* ignore calc errors */ }
+
 
 // Deal new street + record that hero reached this street
 if (stage === "flop") {
@@ -4598,81 +4634,111 @@ try {
 function applyHeroContribution(decision){
   const stage = STAGES[currentStageIndex];
 
-  // Folding can end the hand, as before
+  // --- FOLD ---
   if (decision === 'fold') {
     if (SETTINGS.pot.endHandOnFold) { endHand(); }
     return;
   }
 
+  // --- CALL ---
   if (decision === 'call') {
     if (toCall > 0) {
       pot = toStep5(pot + toCall);
       toCall = 0;
       updatePotInfo();
     }
+    if (stage === 'preflop') {
+      // Ensure we resolve villains after hero completes preflop action (once)
+      if (!ENGINE._resolvedAfterHero) { ENGINE._resolvedAfterHero = true; preflopResolveAfterHero('call'); }
+    }
     return;
   }
 
-if (stage === 'preflop' && decision === 'raise') {
-  const hero = currentPosition();
-  const bb = toStep5(BLINDS.bb);
-  const opener = ENGINE.preflop?.openerSeat ?? null;
-  const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
+  // --- RAISE ---
+  if (decision === 'raise') {
 
-  // Record stat once (context-aware PFR/3B logic lives inside)
-  updateHeroPreflop('raise');
+    // ===== PRE-FLOP (Hero RFI / 3-bet) =====
+    if (stage === 'preflop') {
+      const hero = currentPosition();
+      const bb = toStep5(BLINDS.bb);
+      const opener = ENGINE.preflop?.openerSeat ?? null;
+      const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
 
-  // Opening first-in
-  if (!opener) {
-    const sizeBb = Number(heroActions?.preflop?.sizeBb ?? 2.2);
-    ENGINE.preflop.openerSeat = hero;
-    ENGINE.preflop.openToBb   = sizeBb;
-    preflopAggressor = 'hero';
-    ENGINE.preflop.participants = Array.from(new Set([...(ENGINE.preflop.participants ?? []), hero]));
-    scenario = { label: `Hero opened ${sizeBb.toFixed(1)}x`, potFactor: 0 };
-    updatePotInfo();
-    return;
+      // Record Hero stats first (context-aware: vpip + pfr or 3-bet)
+      updateHeroPreflop('raise'); // checks ENGINE.preflop to decide PFR vs 3B
+
+      // ---- Opening first-in (RFI)
+      if (!opener) {
+        const sizeBb  = Number(heroActions?.preflop?.sizeBb ?? 2.2);
+        const raiseTo = toStep5(sizeBb * bb);
+
+        // Stamp context + pot
+        ENGINE.preflop.openerSeat = hero;
+        ENGINE.preflop.openToBb   = sizeBb;
+        preflopAggressor          = 'hero';
+        ENGINE.preflop.participants = Array.from(new Set([...(ENGINE.preflop.participants ?? []), hero]));
+        pot = contributeRaiseTo(pot, raiseTo, hero);
+
+        // Label (null-safe already)
+        scenario = { label: `Hero opened ${sizeBb.toFixed(1)}x`, potFactor: 0 };
+        updatePotInfo();
+
+        // Resolve villains after Hero acts (exactly once)
+        if (!ENGINE._resolvedAfterHero) { ENGINE._resolvedAfterHero = true; preflopResolveAfterHero('raise'); }
+        return;
+      }
+
+      // ---- Versus an open (no 3-bettor yet) → Hero 3-bets
+      if (opener && !threeBetter) {
+        // If, for any reason, opener was hero, avoid mis-labelling as 3-bet
+        if (opener === hero) { updatePotInfo(); return; }
+
+        // Use opener's known size or safe fallback
+        const knownOpenBb = (ENGINE.preflop.openToBb != null)
+          ? Number(ENGINE.preflop.openToBb)
+          : Number(standardOpenSizeBb(opener));
+
+        const openTo  = toStep5(knownOpenBb * bb);
+        const heroIP  = (["CO","BTN"].includes(hero) && !["CO","BTN"].includes(opener));
+        const mult    = Number(heroActions?.preflop?.sizeMult ?? (heroIP ? 3.0 : 4.0));
+        const threeTo = toStep5(mult * openTo);
+
+        ENGINE.preflop.threeBetterSeat = hero;
+        ENGINE.preflop.threeBetToBb    = threeTo / bb;
+        preflopAggressor               = 'hero';
+        ENGINE.preflop.participants    = Array.from(new Set([...(ENGINE.preflop.participants ?? []), hero]));
+        pot = contributeRaiseTo(pot, threeTo, hero);
+
+        const openX  = knownOpenBb.toFixed(1);
+        const threeX = (threeTo / bb).toFixed(1);
+        scenario = { label: `${opener} opened ${openX}x · Hero 3‑bet ${threeX}x`, potFactor: 0 };
+        updatePotInfo();
+
+        // Resolve villains after Hero acts (exactly once)
+        if (!ENGINE._resolvedAfterHero) { ENGINE._resolvedAfterHero = true; preflopResolveAfterHero('raise'); }
+        return;
+      }
+
+      // ---- If opener & 3-bettor already exist, your 4-bet UI may be separate; keep pot/UI consistent if enabled
+      updatePotInfo();
+      if (!ENGINE._resolvedAfterHero) { ENGINE._resolvedAfterHero = true; preflopResolveAfterHero('raise'); }
+      return;
+    }
+
+    // ===== POST-FLOP (bet or raise)
+    {
+      const pct = heroActions[stage]?.sizePct ?? 50;
+      const betBase = pot;
+      const betAmt  = toStep5((pct / 100) * betBase);
+      const putIn   = (toCall > 0) ? toStep5(toCall + betAmt) : betAmt;
+
+      pot   = toStep5(pot + putIn);
+      toCall = 0;
+      updatePotInfo();
+      return;
+    }
   }
-
-  // Versus an open (no 3-bettor yet) => Hero 3-bets
-  if (opener && !threeBetter) {
-    const openTo = toStep5((ENGINE.preflop.openToBb ?? 2.2) * bb);
-    const heroIP = (["CO","BTN"].includes(hero) && !["CO","BTN"].includes(opener));
-    const mult = Number(heroActions?.preflop?.sizeMult ?? (heroIP ? 3.0 : 4.0));
-    const threeTo = toStep5(mult * openTo);
-
-    ENGINE.preflop.threeBetterSeat = hero;
-    ENGINE.preflop.threeBetToBb    = threeTo / bb;
-    preflopAggressor = 'hero';
-    ENGINE.preflop.participants = Array.from(new Set([...(ENGINE.preflop.participants ?? []), hero]));
-    scenario = { 
-      label: `${opener} opened ${Number(ENGINE.preflop.openToBb).toFixed(1)}x · Hero 3‑bet ${(threeTo/bb).toFixed(1)}x`,
-      potFactor: 0
-    };
-    updatePotInfo();
-    return;
-  }
-
- // If a 3-bettor already exists here, your existing 4-bet code path handles it — keep it below.
 }
-
-// ==== POSTFLOP BET / RAISE LOGIC (stage !== 'preflop') ====
-if (decision === 'raise') {
-    const pct = heroActions[stage]?.sizePct ?? 50;
-    const betBase = pot;
-    const betAmt  = toStep5((pct/100) * betBase);
-
-    const putIn = (toCall > 0)
-        ? toStep5(toCall + betAmt)
-        : betAmt;
-
-    pot = toStep5(pot + putIn);
-    toCall = 0;
-    updatePotInfo();
-    return;
-}
-
-} 
  
 
 // ==================== Submit handling (with coaching) ====================
