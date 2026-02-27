@@ -635,6 +635,18 @@ body.compact-auto .primary{ padding:9px 14px; }
   text-overflow: ellipsis;  /* … for long labels */
 }
 ``
+/* Mobile portrait: allow the scenario chip to wrap & show two lines */
+@media (max-width: 720px) {
+  #kpiScenario {
+    white-space: normal;
+    line-height: 1.15;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;     /* show 2 lines */
+    overflow: hidden;
+  }
+}
+
 
 /* =========================================================
    Stability override (kept small) — ensures preflop heatmap
