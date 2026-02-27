@@ -734,16 +734,6 @@ function markStreetReached(stage){
 }
 
 // Preflop update: decision + price context
-function updateHeroPreflop(decision, toCall){
-  // VPIP if hero voluntarily calls or raises
-  if (decision === 'call' || decision === 'raise') HERO_STATS.vpip++;
-
-  // If hero raises with no price to call → PFR; if raises facing a price → 3-bet
-  if (decision === 'raise') {
-    if (toCall > 0) HERO_STATS.threeBet++;
-    else HERO_STATS.pfr++;
-  }
-}
 
 function updateHeroPreflop(decision /*, _toCall */){
 // VPIP counts both opens and calls
@@ -1654,7 +1644,7 @@ function preflopSimulateBeforeHero(){
   let threeBetterSeat = null, threeBetToBb = null;
   const coldCallers = [];
 
-  // reset statuses; start optimistic "in", flip to folded_now if they fold
+  // reset statuses
   Object.keys(ENGINE.statusBySeat).forEach(seat => { ENGINE.statusBySeat[seat] = "in"; });
 
   for (const s of forSeatsBeforeHero(heroSeat)){
@@ -1662,8 +1652,9 @@ function preflopSimulateBeforeHero(){
     if (!h || !h.length) { ENGINE.statusBySeat[s] = "folded_now"; continue; }
     const code = handToCode(h);
 
+    // No opener yet → seat may open (use canOpen → JSON or explicit/hybrid)
     if (!openerSeat){
-      if (jsonWouldOpen(s, code)){
+      if (canOpen(s, code)){
         openerSeat = s;
         openToBb = standardOpenSizeBb(s);
         const raiseTo = toStep5(openToBb * bb);
@@ -1674,14 +1665,14 @@ function preflopSimulateBeforeHero(){
       continue;
     }
 
-    // opener exists
+    // opener exists, no 3-bettor yet → 3-bet or flat using hybrid-aware helpers
     if (!threeBetterSeat){
-      if (jsonWould3Bet(s, openerSeat, code)){
+      if (inThreeBetBucket(s, openerSeat, code)){
         threeBetterSeat = s;
         threeBetToBb = threeBetSizeBb(openerSeat, s, openToBb);
         const rTo = toStep5(threeBetToBb * bb);
         potLocal = contributeRaiseTo(potLocal, rTo, s);
-      } else if (jsonWouldCallVsOpen(s, openerSeat, code)){
+      } else if (inCallBucket(s, openerSeat, code)){
         const rTo = toStep5(openToBb * bb);
         potLocal = contributeCallTo(potLocal, rTo, s);
         coldCallers.push(s);
@@ -1691,9 +1682,8 @@ function preflopSimulateBeforeHero(){
       continue;
     }
 
-    // opener + 3-bettor already in front of hero
-    // per your spec: villains do NOT 4-bet here before hero; allow flats if they defend
-    if (jsonWouldCallVsOpen(s, openerSeat, code)){
+    // opener + 3-bettor already exist → allow flats vs 3-bet using hybrid-aware helper
+    if (inCallBucket(s, openerSeat, code)){
       const rTo = toStep5(threeBetToBb * bb);
       potLocal = contributeCallTo(potLocal, rTo, s);
       coldCallers.push(s);
@@ -1702,30 +1692,26 @@ function preflopSimulateBeforeHero(){
     }
   }
 
-  // --- Compute hero's price to call when hero is next to act ---
-const heroPostedBlind = postedBlindFor(heroSeat);
-let toCallLocal = 0;
+  // Compute hero's price to call
+  const heroPostedBlind = postedBlindFor(heroSeat);
+  let toCallLocal = 0;
+  if (!openerSeat){
+    toCallLocal = (heroSeat === 'BB') ? 0 : (heroSeat === 'SB' ? Math.max(0, bb - sb) : bb);
+  } else if (threeBetterSeat){
+    const rTo = toStep5(threeBetToBb * bb);
+    toCallLocal = Math.max(0, rTo - heroPostedBlind);
+  } else {
+    const rTo = toStep5(openToBb * bb);
+    toCallLocal = Math.max(0, rTo - heroPostedBlind);
+  }
 
-if (!openerSeat){
-  // unopened to hero: BB 0, SB completes difference, others face 1 BB
-  toCallLocal = (heroSeat === 'BB') ? 0
-               : (heroSeat === 'SB' ? Math.max(0, bb - sb) : bb);
-} else if (threeBetterSeat){
-  const rTo = toStep5(threeBetToBb * bb);
-  toCallLocal = Math.max(0, rTo - heroPostedBlind);
-} else {
-  const rTo = toStep5(openToBb * bb);
-  toCallLocal = Math.max(0, rTo - heroPostedBlind);
-}
-
-  // Record preflop context for post‑flop & equity engines
-  ENGINE.preflop.openerSeat = openerSeat ?? null;
-  ENGINE.preflop.threeBetterSeat = threeBetterSeat ?? null;
-  ENGINE.preflop.coldCallers = Array.from(new Set(coldCallers));
-  ENGINE.preflop.openToBb = (openToBb == null ? null : Number(openToBb));
-  ENGINE.preflop.threeBetToBb = (threeBetToBb == null ? null : Number(threeBetToBb)); // NEW internal memo
-
-  ENGINE.preflop.participants = (() => {
+  // Record preflop context
+  ENGINE.preflop.openerSeat     = openerSeat ?? null;
+  ENGINE.preflop.threeBetterSeat= threeBetterSeat ?? null;
+  ENGINE.preflop.coldCallers    = Array.from(new Set(coldCallers));
+  ENGINE.preflop.openToBb       = (openToBb == null ? null : Number(openToBb));
+  ENGINE.preflop.threeBetToBb   = (threeBetToBb == null ? null : Number(threeBetToBb));
+  ENGINE.preflop.participants   = (() => {
     const p = new Set();
     if (openerSeat) p.add(openerSeat);
     if (threeBetterSeat) p.add(threeBetterSeat);
@@ -1737,85 +1723,71 @@ if (!openerSeat){
   return { potLocal, toCallLocal, openerSeat, openToBb, threeBetterSeat, threeBetToBb, coldCallers, label };
 }
 
+
 // --- LAST‑AGGRESSOR policy (no cycling) ---
 // We DO NOT wrap back around the table. After Hero acts, we scan seats AFTER Hero.
 // If a NEW aggressor appears after Hero, we allow seats after them to respond once, then end.
-// If the prior aggressor (before Hero) must respond (e.g., after‑Hero squeeze), we resolve exactly one required response and end.
+// If the prior aggressor (before Hero) must respond (e.g., after‑Hero squeeze), we resolve exactly one required response // and end.
 
 function preflopResolveAfterHero(decision){
   const hero = currentPosition();
   const sb = toStep5(BLINDS.sb), bb = toStep5(BLINDS.bb);
-
   let opener = ENGINE.preflop.openerSeat ?? null;
   let threeBetter = ENGINE.preflop.threeBetterSeat ?? null;
   let openToBb = ENGINE.preflop.openToBb ?? null;
   let threeBetToBb = ENGINE.preflop.threeBetToBb ?? null;
 
-  // Helper to add participant & status
   function keepIn(seat){ ENGINE.statusBySeat[seat] = "in"; }
   function noteParticipant(seat){
     ENGINE.preflop.participants = Array.from(new Set([...(ENGINE.preflop.participants ?? []), seat]));
   }
 
-  // Track last aggressor (the position action "returns" to); start with prior one
+  // Track last aggressor before hero
   let lastAggressor = threeBetter ?? opener ?? null;
 
-  // Special: If Hero RAISED and there was already (opener && threeBetter && threeBetter!=Hero) → Hero made a 4‑bet
-  // Villain three‑bettor gets exactly one decision: call if their 3‑bet range contains their hand vs the opener; else fold.
+  // Special: if Hero 4-bet over an existing 3-bet (villain), resolve one defender decision and end
   if (decision === 'raise' && opener && threeBetter && threeBetter !== hero){
     const h = seatHand(threeBetter);
     const code = h ? handToCode(h) : null;
-    const canDefend4b = code ? jsonWould3Bet(threeBetter, opener, code) : false;
-    const heroAlready = postedBlindFor(hero);
-    // Estimate Hero's 4‑bet "raise‑to" using current pot contribution (no double counting), re-derive from UI mult if available
-    const multDefault = (idxOfSeat(hero) > idxOfSeat(threeBetter) && hero !== 'SB' && hero !== 'BB') ? 2.2 : 2.4; // IP/OOP guideline
-    const threeTo = toStep5((threeBetToBb ?? ((openToBb ?? 2.2)* ( (idxOfSeat(threeBetter)>idxOfSeat(opener)) ? 3.0 : 4.0 ))) * bb);
-    const heroMult = (heroActions?.preflop?.sizeMult != null) ? Number(heroActions.preflop.sizeMult) : multDefault;
+    const canDefend4b = code ? inThreeBetBucket(threeBetter, opener, code) : false;
+    const threeTo = toStep5((threeBetToBb ?? ((openToBb ?? 2.2) * ((idxOfSeat(threeBetter)>idxOfSeat(opener)) ? 3.0 : 4.0))) * bb);
+    const heroMult = (heroActions?.preflop?.sizeMult != null) ? Number(heroActions.preflop.sizeMult) : 2.4;
     const fourTo = toStep5(heroMult * (threeTo / bb) * bb);
-    // Villain response to 4‑bet
+
     if (canDefend4b){
       pot = contributeCallTo(pot, fourTo, threeBetter);
       keepIn(threeBetter); noteParticipant(threeBetter);
     } else {
       ENGINE.statusBySeat[threeBetter] = "folded_now";
     }
-    // Resolve: end round; no more actions; Hero will see Next Stage button
     toCall = 0; updatePotInfo();
     scenario = { label: `${opener} opened ${openToBb?.toFixed?.(1) ?? '—'}x · ${threeBetter} 3‑bet · Hero 4‑bet`, potFactor: 0 };
     return;
   }
 
-  // Build the post‑Hero seat sequence (NO wrap)
+  // Seats after Hero, single pass, no wrap
   const tail = forSeatsAfterHero(hero);
-
-  // Whether the original aggressor (before Hero) still needs a response (for after‑Hero squeezes)
   let needsPriorAggressorResolve = false;
   let priorAggressorToResolve = null;
 
-  // Current active "price to call" for tail seats
   let currentPriceTo = 0;
-
-  // Initialize price given current context
   if (opener && threeBetter){
     currentPriceTo = toStep5((threeBetToBb ?? 0) * bb);
   } else if (opener){
     currentPriceTo = toStep5((openToBb ?? 0) * bb);
   } else {
-    currentPriceTo = 0; // unopened, limped, or BB check
+    currentPriceTo = 0;
   }
 
-  // Pass through seats AFTER Hero exactly once
   for (const s of tail){
-    // If we "return" to lastAggressor in table order, we STOP immediately (no second turns)
     if (s === lastAggressor) break;
-
     const h = seatHand(s);
     if (!h || !h.length) { ENGINE.statusBySeat[s] = "folded_now"; continue; }
     const code = handToCode(h);
 
-    // Case 1: No opener yet (Hero may have limped/checked) — allow normal opens after Hero
+    // No opener yet (Hero may have limped/checked) — allow opens after Hero
     if (!opener){
-      if (jsonWouldOpen(s, code)){
+      if (canOpen(s, code)){
         opener = s; lastAggressor = s;
         openToBb = standardOpenSizeBb(s);
         const raiseTo = toStep5(openToBb * bb);
@@ -1823,29 +1795,24 @@ function preflopResolveAfterHero(decision){
         scenario = { label: `${s} opened ${openToBb.toFixed(1)}x`, potFactor: 0 };
         currentPriceTo = raiseTo;
         keepIn(s); noteParticipant(s);
-        continue;
       } else {
         ENGINE.statusBySeat[s] = "folded_now";
-        continue;
       }
+      continue;
     }
 
-    // Case 2: Opener exists, no 3‑bet yet → seats may 3‑bet (squeeze) or call
+    // Opener exists, no 3-bettor yet → 3-bet (squeeze) or call (hybrid-aware)
     if (opener && !threeBetter){
-      if (jsonWould3Bet(s, opener, code)){
+      if (inThreeBetBucket(s, opener, code)){
         threeBetter = s; lastAggressor = s;
         threeBetToBb = threeBetSizeBb(opener, s, openToBb);
         const rTo = toStep5(threeBetToBb * bb);
         pot = contributeRaiseTo(pot, rTo, s);
         scenario = { label: `${opener} opened ${openToBb.toFixed(1)}x · ${s} 3‑bet ${threeBetToBb.toFixed(1)}x`, potFactor: 0 };
-        // The prior aggressor (the opener) is BEFORE Hero; they must get one resolve after the tail ends
         needsPriorAggressorResolve = true; priorAggressorToResolve = opener;
         currentPriceTo = rTo;
         keepIn(s); noteParticipant(s);
-        continue;
-      }
-      // Else: consider a flat vs open
-      if (jsonWouldCallVsOpen(s, opener, code)){
+      } else if (inCallBucket(s, opener, code)){
         const rTo = toStep5(openToBb * bb);
         pot = contributeCallTo(pot, rTo, s);
         keepIn(s); noteParticipant(s);
@@ -1855,10 +1822,9 @@ function preflopResolveAfterHero(decision){
       continue;
     }
 
-    // Case 3: Opener + 3‑bettor exist → tail seats can flat vs 3‑bet (no 4‑bets by villains here)
+    // Opener + 3-bettor exist → tail seats can flat vs 3-bet (no 4-bets by villains here)
     if (opener && threeBetter){
-      // Simplify defend vs 3‑bet with the same 'vs_open' call map (pragmatic trainer rule)
-      if (jsonWouldCallVsOpen(s, opener, code)){
+      if (inCallBucket(s, opener, code)){
         const rTo = toStep5(threeBetToBb * bb);
         pot = contributeCallTo(pot, rTo, s);
         keepIn(s); noteParticipant(s);
@@ -1869,14 +1835,12 @@ function preflopResolveAfterHero(decision){
     }
   }
 
-  // If a new 3‑bet (squeeze) happened AFTER Hero, resolve exactly ONE required decision for the prior aggressor (usually the opener),
-  // then stop (no cycling). This mirrors real poker without giving anyone a second full turn.
+  // Resolve one decision for the prior aggressor after a squeeze
   if (needsPriorAggressorResolve && priorAggressorToResolve){
     const s = priorAggressorToResolve;
     const h = seatHand(s);
     const code = h ? handToCode(h) : null;
-    // Use defend vs 3‑bet proxy = remain in (call) if they were capable of 3‑betting this hand in the first place
-    const canDefend = code ? jsonWould3Bet(s, opener, code) || jsonWouldCallVsOpen(s, opener, code) : false;
+    const canDefend = code ? (inThreeBetBucket(s, opener, code) || inCallBucket(s, opener, code)) : false;
     if (canDefend){
       const rTo = toStep5(threeBetToBb * bb);
       pot = contributeCallTo(pot, rTo, s);
@@ -1886,13 +1850,10 @@ function preflopResolveAfterHero(decision){
     }
   }
 
-  // At the end of the pre‑flop round, there must be no price left for Hero
-  toCall = 0;
-  updatePotInfo();
+  // End preflop with no price for Hero
+  toCall = 0; updatePotInfo();
 
-  // Finalize participants set (unique seats who contributed this street)
   const finalP = new Set(ENGINE.preflop.participants ?? []);
-  // Always include hero if hero did not fold
   if (!handHistory.some(h => h.stage === 'preflop' && h.decision === 'fold')) finalP.add(hero);
   ENGINE.preflop.participants = Array.from(finalP);
 }
@@ -2871,62 +2832,57 @@ function classifyHeroHandAtPosition(){
 
 // Context-aware preflop suggestion for the badge & modal.
 // Returns: { kind: 'Open'|'3-Bet'|'Call'|'Fold', band: 'green'|'amber'|'red', src: 'JSON'|'HYBRID'|'EXPLICIT'|'FALLBACK', detail?: string }
+
+// Context-aware preflop suggestion for the badge & modal.
+// Returns: { kind: 'Open'|'3-Bet'|'4-Bet'|'Call'|'Fold', band: 'green'|'amber'|'red', src: 'JSON'|'HYBRID'|'EXPLICIT'|'FALLBACK'|'SB-3bet-or-fold' }
 function classifyHeroPreflopBadge(){
   const seat = currentPosition();
   const code = heroHandCode();
-  const opener = ENGINE.preflop?.openerSeat ?? null; // set in startNewHand() via engineSetPreflopContext(...)
- const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
- 
- // --- 1) Unopened pot -> use Open ranges for hero seat ---
+  const opener = ENGINE.preflop?.openerSeat ?? null;
+  const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
+
+  // 1) Unopened pot → use Open ranges for hero seat
   if (!opener) {
-    // Prefer JSON open
     try {
       const bucket = RANGES_JSON?.open?.[seat];
       if (bucket && bucket[code] != null) {
         const cls = freqToClass(bucket[code]); // 'open' | 'mix' | 'fold'
-        if (cls === 'open')  return { kind:'Open', band:'green', src:'JSON' };
-        if (cls === 'mix')   return { kind:'Open', band:'amber', src:'JSON' };
+        if (cls === 'open') return { kind:'Open', band:'green', src:'JSON' };
+        if (cls === 'mix')  return { kind:'Open', band:'amber', src:'JSON' };
         return { kind:'Fold', band:'red', src:'JSON' };
       }
     } catch(e){/* fallback below */}
-    // Explicit fallback (your EXPLICIT_OPEN sets), then hybrid
     try {
-      const clsMap = getClassMapForSeat(seat); // already prefers explicit, then hybrid
+      const clsMap = getClassMapForSeat(seat); // prefers explicit, then hybrid
       const cls = (clsMap.get(code) ?? 'fold');
-      if (cls === 'open')  return { kind:'Open', band:'green', src:'EXPLICIT' };
-      if (cls === 'mix')   return { kind:'Open', band:'amber', src:'EXPLICIT' };
+      if (cls === 'open') return { kind:'Open', band:'green', src:'EXPLICIT' };
+      if (cls === 'mix')  return { kind:'Open', band:'amber', src:'EXPLICIT' };
     } catch(e){}
     return { kind:'Fold', band:'red', src:'FALLBACK' };
   }
 
-// --- 2) Facing a 3-bet before hero acts (opener + threeBetter exist) ---
-if (opener && threeBetter) {
-  // Optional JSON support: RANGES_JSON.vs_3bet
-  // Accept either a detailed key with opener context or a simpler key.
-  try {
-    const key1 = `${seat}_vs_${threeBetter}_over_${opener}`;
-    const key2 = `${seat}_vs_${threeBetter}`;
-    const rb = RANGES_JSON?.vs_3bet?.[key1] || RANGES_JSON?.vs_3bet?.[key2];
-    if (rb) {
-      // Expect schema like: { four_bet: { [code]: freq }, call: { [code]: freq } }
-      const fb = rb.four_bet ? freqToClass(rb.four_bet[code]) : null;
-      const cb = rb.call     ? freqToClass(rb.call[code])     : null;
-      if (fb === 'open')  return { kind:'4-Bet', band:'green', src:'JSON' };
-      if (fb === 'mix')   return { kind:'4-Bet', band:'amber', src:'JSON' };
-      if (cb === 'open')  return { kind:'Call',  band:'green', src:'JSON' };
-      if (cb === 'mix')   return { kind:'Call',  band:'amber', src:'JSON' };
-      // Else fall through to conservative fallback
-    }
-  } catch(e){ /* ignore and use fallback */ }
+  // 2) Facing a 3-bet before hero acts → use vs_3bet JSON if present; else conservative fallback
+  if (opener && threeBetter) {
+    try {
+      const key1 = `${seat}_vs_${threeBetter}_over_${opener}`;
+      const key2 = `${seat}_vs_${threeBetter}`;
+      const rb = RANGES_JSON?.vs_3bet?.[key1] ?? RANGES_JSON?.vs_3bet?.[key2];
+      if (rb) {
+        const fb = rb.four_bet ? freqToClass(rb.four_bet[code]) : null;
+        const cb = rb.call     ? freqToClass(rb.call[code])     : null;
+        if (fb === 'open') return { kind:'4-Bet', band:'green', src:'JSON' };
+        if (fb === 'mix')  return { kind:'4-Bet', band:'amber', src:'JSON' };
+        if (cb === 'open') return { kind:'Call', band:'green', src:'JSON' };
+        if (cb === 'mix')  return { kind:'Call', band:'amber', src:'JSON' };
+      }
+    } catch(e){/* ignore */}
+    const strong4b = new Set(['AA','KK','QQ','AKs','AKo']);
+    if (strong4b.has(code)) return { kind:'4-Bet', band:'green', src:'FALLBACK' };
+    return { kind:'Fold', band:'red', src:'FALLBACK' };
+  }
 
-  // Conservative fallback (safe default): only top value hands 4-bet; everything else folds.
-  const strong4b = new Set(['AA','KK','QQ','AKs','AKo']);
-  if (strong4b.has(code)) return { kind:'4-Bet', band:'green', src:'FALLBACK' };
-  return { kind:'Fold', band:'red', src:'FALLBACK' };
-}
-
-  // --- 2) Facing an open -> prefer 3-bet if available, else Call, else Fold ---
-  // 2a) JSON 3-bet
+  // 3) Facing an open → prefer 3-bet; else Call; else Fold
+  // 3a) JSON 3-bet
   try {
     const key = `${seat}_vs_${opener}`;
     const tb = RANGES_JSON?.three_bet?.[key];
@@ -2935,9 +2891,8 @@ if (opener && threeBetter) {
       if (cls === 'open') return { kind:'3-Bet', band:'green', src:'JSON' };
       if (cls === 'mix')  return { kind:'3-Bet', band:'amber', src:'JSON' };
     }
-  } catch(e){/* fallback next */}
-
-  // 2b) JSON Call (BB uses defend.BB_vs_<opener>; others use vs_open.<seat>_vs_<opener>.call)
+  } catch(e){/* continue */}
+  // 3b) JSON Call (BB from defend.*, others from vs_open.<seat>_vs_<opener>.call)
   try {
     if (seat === 'BB') {
       const key = `BB_vs_${opener}`;
@@ -2955,24 +2910,30 @@ if (opener && threeBetter) {
         if (cls === 'open') return { kind:'Call', band:'green', src:'JSON' };
         if (cls === 'mix')  return { kind:'Call', band:'amber', src:'JSON' };
       }
+      // SB: no JSON flat found → treat as 3-bet/fold training rule
+      if (seat === 'SB') {
+        return { kind:'Fold', band:'red', src:'SB-3bet-or-fold' };
+      }
     }
-  } catch(e){/* fallback next */}
+  } catch(e){/* continue */}
 
-  // 2c) HYBRID fallbacks (token lists you already ship)
+  // 3c) HYBRID fallbacks (token lists you ship)
   try {
-    // 3-bet hybrid
+    // 3-bet hybrid (seat & opener aware)
     const lists3 = HYBRID_3BET_RANGES?.[seat]?.[opener] ?? null;
     const lm3 = listToClassMap(lists3);
     const cls3 = classFromLists(lm3, code); // 'open'|'mix'|'fold'
     if (cls3 === 'open') return { kind:'3-Bet', band:'green', src:'HYBRID' };
     if (cls3 === 'mix')  return { kind:'3-Bet', band:'amber', src:'HYBRID' };
 
-    // Call hybrid
-    const listsCall = HYBRID_DEFEND_RANGES?.[opener] ?? null; // defend maps keyed by opener seat
+    // Call hybrid — seat-agnostic; DO NOT apply to SB
+    const listsCall = HYBRID_DEFEND_RANGES?.[opener] ?? null;
     const lmC = listToClassMap(listsCall);
     const clsC = classFromLists(lmC, code);
-    if (clsC === 'open') return { kind:'Call', band:'green', src:'HYBRID' };
-    if (clsC === 'mix')  return { kind:'Call', band:'amber', src:'HYBRID' };
+    if (seat !== 'SB') {
+      if (clsC === 'open') return { kind:'Call', band:'green', src:'HYBRID' };
+      if (clsC === 'mix')  return { kind:'Call', band:'amber', src:'HYBRID' };
+    }
   } catch(e){}
 
   // Nothing matched → Fold
@@ -4652,86 +4613,67 @@ function applyHeroContribution(decision){
     return;
   }
 
-  if (decision === 'raise') {
-
-if (stage === 'preflop') {
+if (stage === 'preflop' && decision === 'raise') {
+  const hero = currentPosition();
   const bb = toStep5(BLINDS.bb);
-  const heroSeat = currentPosition();
   const opener = ENGINE.preflop?.openerSeat ?? null;
   const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
 
-  const heroAlready = (heroSeat === 'SB') ? toStep5(BLINDS.sb)
-                     : (heroSeat === 'BB') ? toStep5(BLINDS.bb)
-                     : 0;
+  // Record stat once (context-aware PFR/3B logic lives inside)
+  updateHeroPreflop('raise');
 
-  const heroIsOpener = (opener === heroSeat);
-  const facingOpen   = !!opener && !heroIsOpener;
-  const facing3Bet   = !!opener && !!threeBetter && threeBetter !== heroSeat;
-
-  if (!opener || heroIsOpener) {
-    // ===== OPEN (×BB) =====
-    const sizeBB = (heroActions.preflop.sizeBb ?? 2.5);
-    const raiseTo = toStep5(sizeBB * bb);
-    const putIn = Math.max(0, raiseTo - heroAlready);
-    pot = toStep5(pot + putIn);
-    toCall = 0;
+  // Opening first-in
+  if (!opener) {
+    const sizeBb = Number(heroActions?.preflop?.sizeBb ?? 2.2);
+    ENGINE.preflop.openerSeat = hero;
+    ENGINE.preflop.openToBb   = sizeBb;
+    preflopAggressor = 'hero';
+    ENGINE.preflop.participants = Array.from(new Set([...(ENGINE.preflop.participants ?? []), hero]));
+    scenario = { label: `Hero opened ${sizeBb.toFixed(1)}x`, potFactor: 0 };
     updatePotInfo();
     return;
   }
 
-  if (facingOpen && !threeBetter) {
-    // ===== 3‑BET vs opener (× of opener’s raise‑to) =====
-    const openToBb = Number(ENGINE.preflop?.openToBb ?? 2.2);
-    const iHero = ACTION_ORDER.indexOf(heroSeat);
-    const iOp   = ACTION_ORDER.indexOf(opener);
-    const heroIP = (iHero > iOp) && heroSeat !== 'SB' && heroSeat !== 'BB';
-    const defaultMult = heroIP ? 3.0 : 4.0;
-    const mult = (heroActions.preflop.sizeMult != null) ? heroActions.preflop.sizeMult : defaultMult;
-    const raiseToBb = mult * openToBb;
-    const raiseTo = toStep5(raiseToBb * bb);
-    const putIn = Math.max(0, raiseTo - heroAlready);
-    pot = toStep5(pot + putIn);
-    toCall = 0;
+  // Versus an open (no 3-bettor yet) => Hero 3-bets
+  if (opener && !threeBetter) {
+    const openTo = toStep5((ENGINE.preflop.openToBb ?? 2.2) * bb);
+    const heroIP = (["CO","BTN"].includes(hero) && !["CO","BTN"].includes(opener));
+    const mult = Number(heroActions?.preflop?.sizeMult ?? (heroIP ? 3.0 : 4.0));
+    const threeTo = toStep5(mult * openTo);
+
+    ENGINE.preflop.threeBetterSeat = hero;
+    ENGINE.preflop.threeBetToBb    = threeTo / bb;
+    preflopAggressor = 'hero';
+    ENGINE.preflop.participants = Array.from(new Set([...(ENGINE.preflop.participants ?? []), hero]));
+    scenario = { 
+      label: `${opener} opened ${Number(ENGINE.preflop.openToBb).toFixed(1)}x · Hero 3‑bet ${(threeTo/bb).toFixed(1)}x`,
+      potFactor: 0
+    };
     updatePotInfo();
     return;
   }
 
-  if (facing3Bet) {
-    // ===== 4‑BET vs existing three‑bettor =====
-    const threeToBb = Number(ENGINE.preflop?.threeBetToBb ??  ( (Number(ENGINE.preflop?.openToBb ?? 2.2)) * 3.5 ));
-    const iHero = ACTION_ORDER.indexOf(heroSeat);
-    const i3b   = ACTION_ORDER.indexOf(threeBetter);
-    const heroIP = (iHero > i3b) && heroSeat !== 'SB' && heroSeat !== 'BB';
-    const defaultMult = heroIP ? 2.2 : 2.4; // conservative training baseline
-    const mult = (heroActions.preflop.sizeMult != null) ? Number(heroActions.preflop.sizeMult) : defaultMult;
-
-    const raiseToBb = mult * threeToBb;
-    const raiseTo = toStep5(raiseToBb * bb);
-    const putIn = Math.max(0, raiseTo - heroAlready);
-    pot = toStep5(pot + putIn);
-    toCall = 0;
-    updatePotInfo();
-    return;
-  }
+ // If a 3-bettor already exists here, your existing 4-bet code path handles it — keep it below.
 }
 
-else {
-      // Postflop: Bet (toCall==0) or Raise (toCall>0)
-      const pct = heroActions[stage].sizePct ?? 50;
-      const betBase = pot; // base is current pot
-      const betAmt = toStep5((pct/100) * betBase);
+// ==== POSTFLOP BET / RAISE LOGIC (stage !== 'preflop') ====
+if (decision === 'raise') {
+    const pct = heroActions[stage]?.sizePct ?? 50;
+    const betBase = pot;
+    const betAmt  = toStep5((pct/100) * betBase);
 
-      // If facing a bet, a raise is (call + extra). Keep it trainer-simple:
-      // raise contribution = toCall + betAmt
-      const putIn = (toCall > 0) ? toStep5(toCall + betAmt) : betAmt;
+    const putIn = (toCall > 0)
+        ? toStep5(toCall + betAmt)
+        : betAmt;
 
-      pot = toStep5(pot + putIn);
-      toCall = 0;
-      updatePotInfo();
-      return;
-    }
-  }
+    pot = toStep5(pot + putIn);
+    toCall = 0;
+    updatePotInfo();
+    return;
 }
+
+} 
+ 
 
 // ==================== Submit handling (with coaching) ====================
 inputForm.addEventListener("submit", (e)=>{
