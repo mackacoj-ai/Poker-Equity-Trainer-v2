@@ -14,31 +14,6 @@ let difficulty = "beginner";
 let handHistory = [];
 let sessionHistory = [];
 
-// ==================== Postflop / Preflop Shared Engine State ====================
-const ENGINE = {
-  survivors: new Set(),
-  survivorsByStreet: { flop: [], turn: [], river: [] },
-  lastStreetComputed: 'preflop',
-  preflop: {
-    openerSeat: null,
-    threeBetterSeat: null,
-    coldCallers: [],       // optional memo for preflop labelling
-    participants: [],      // who put money in preflop
-    openToBb: null,        // opener raise-to (in BB) – set by preflop engine
-    threeBetToBb: null     // 3-bet raise-to (in BB) – set by preflop engine
-  },
-  // track statuses: "in", "folded_now", "folded_prev"
-  statusBySeat: {
-    UTG: 'in',
-    HJ:  'in',
-    CO:  'in',
-    BTN: 'in',
-    SB:  'in',
-    BB:  'in'
-  }
-};
-
-
 // ==================== Personalities (session-level) ====================
 // Hero is never assigned a sampled personality.
 const HERO_LETTER = "H";
@@ -54,590 +29,6 @@ const PERSONALITY_INFO = {
   NIT:     { label: "Nit / Rock",                 how: "Very tight; folds too much; strong when continuing.",            spot: "Steal often; give credit when they show strength." },
   MANIAC:  { label: "Maniac",                     how: "Very high VPIP & aggression; over‑bluffs.",                      spot: "Trap pre; induce; call down with good bluff‑catchers; avoid thin bluffs." }
 };
-
-// ===== Hand family helpers for archetype scaling =====
-function handCodeFamily(code) {
-  // 'AA', 'AKs', 'AQo', etc.
-  if (!code || typeof code !== 'string') return 'other';
-  const pair = /^[2-9TJQKA]\1$/.test(code);
-  if (pair) return 'pairs';
-  const suited = code.endsWith('s');
-  const offsuit = code.endsWith('o');
-  const hi = code[0], lo = code[1];
-
-  // Broadways set
-  const BW = new Set(["A","K","Q","J","T"]);
-  const isBW = BW.has(hi) && BW.has(lo);
-
-  if (suited && isBW) return 'suited_broadways';
-  if (offsuit && isBW) return 'offsuit_broadways';
-
-  // Ax families
-  if (hi === 'A' && suited) return 'suited_ax';
-  if (hi === 'A' && offsuit) return 'offsuit_ax';
-
-  // Connectors / gappers (rank index diff = 1 or 2, ignoring A-low edge cases)
-  const order = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"];
-  const iHi = order.indexOf(hi), iLo = order.indexOf(lo);
-  if (iHi >= 0 && iLo > iHi) {
-    const gap = (iLo - iHi) - 1; // e.g., KQ -> 0, KJ -> 1, KT -> 2
-    if (suited && gap === 0) return 'suited_connectors';
-    if (suited && gap === 1) return 'suited_one_gappers';
-  }
-
-  // Junk buckets
-  if (suited)  return 'suited_junk';
-  if (offsuit) return 'offsuit_junk';
-  return 'other';
-}
-
-// ===== Archetype numeric modifiers (multipliers applied to base weights) =====
-// 1.00 = neutral; >1 widen; <1 tighten.
-// Keep conservative to stay stable on mobile with modest trials.
-const ARCHETYPE_MODIFIERS = {
-  TAG: { // Tight-Aggressive baseline
-    pairs:1.05, suited_broadways:1.00, offsuit_broadways:0.95,
-    suited_ax:0.95, offsuit_ax:0.90,
-    suited_connectors:0.90, suited_one_gappers:0.88,
-    suited_junk:0.80, offsuit_junk:0.75, other:0.95
-  },
-  LAG: { // Loose-Aggressive widens suited/gappers
-    pairs:0.98, suited_broadways:1.08, offsuit_broadways:1.05,
-    suited_ax:1.10, offsuit_ax:1.00,
-    suited_connectors:1.25, suited_one_gappers:1.20,
-    suited_junk:1.15, offsuit_junk:1.10, other:1.05
-  },
-  STATION: { // Calls too much (widen junk/off-broadways)
-    pairs:1.00, suited_broadways:1.05, offsuit_broadways:1.12,
-    suited_ax:1.05, offsuit_ax:1.10,
-    suited_connectors:1.10, suited_one_gappers:1.05,
-    suited_junk:1.20, offsuit_junk:1.30, other:1.08
-  },
-  NIT: { // Very tight except premiums
-    pairs:1.12, suited_broadways:1.05, offsuit_broadways:0.80,
-    suited_ax:0.80, offsuit_ax:0.70,
-    suited_connectors:0.70, suited_one_gappers:0.65,
-    suited_junk:0.50, offsuit_junk:0.40, other:0.75
-  },
-  MANIAC: { // Very wide + aggro; keep preflop still plausible
-    pairs:0.95, suited_broadways:1.15, offsuit_broadways:1.20,
-    suited_ax:1.15, offsuit_ax:1.10,
-    suited_connectors:1.30, suited_one_gappers:1.30,
-    suited_junk:1.25, offsuit_junk:1.20, other:1.15
-  }
-};
-
-// Map seat -> archetype (falls back to TAG if undefined)
-function seatArchetype(seat) {
-  try {
-    const letter = LETTERS_BY_POSITION?.[seat];
-    const key = SESSION_PERSONA_BY_LETTER?.[letter]; // 'TAG','LAG','STATION','NIT','MANIAC'
-    return (ARCHETYPE_MODIFIERS[key]) ? key : 'TAG';
-  } catch(e){ return 'TAG'; }
-}
-
-// ===== Range → weight map utilities =====
-
-// 1) Convert class -> base numeric weight
-function classToWeight(cls){ // 'open'|'mix'|'fold'
-  if (cls === 'open') return 1.0;
-  if (cls === 'mix')  return 0.5;
-  return 0.0;
-}
-
-// 2) JSON frequency -> weight (fallback if you have numeric freq)
-function freqToWeight(freq){
-  if (freq == null) return 0.0;
-  const f = Number(freq);
-  if (!Number.isFinite(f)) return 0.0;
-  if (f >= 0.67) return 1.0;
-  if (f >= 0.15) return 0.5;
-  return 0.0;
-}
-
-// 3) Build code->class map for OPEN from your existing helpers/JSON
-function classMapOpenForSeat(seat){
-  // Prefer JSON open if present
-  try{
-    const buck = RANGES_JSON?.open?.[seat];
-    if (buck){
-      const m = new Map();
-      for (const [code, freq] of Object.entries(buck)){
-        const w = freqToWeight(freq);
-        m.set(code, (w >= 1.0 ? 'open' : (w >= 0.5 ? 'mix':'fold')));
-      }
-      return m;
-    }
-  }catch(e){}
-
-  // Fallback to your explicit/hybrid builder (already in your file)
-  try{
-    return getClassMapForSeat(seat); // returns Map<code,'open'|'mix'|'fold'>
-  }catch(e){}
-
-  return new Map();
-}
-
-// 4) Build code->class for 3-bet (seat vs opener), prefer JSON then hybrid tokens
-function classMap3Bet(seat, opener){
-  // JSON possible key: `${seat}_vs_${opener}`
-  try{
-    const key = `${seat}_vs_${opener}`;
-    const buck = RANGES_JSON?.three_bet?.[key];
-    if (buck){
-      const m = new Map();
-      for (const [code, freq] of Object.entries(buck)){
-        const w = freqToWeight(freq);
-        m.set(code, (w >= 1.0 ? 'open' : (w >= 0.5 ? 'mix':'fold')));
-      }
-      return m;
-    }
-  }catch(e){}
-
-  // Hybrid token fallback from your built-ins
-  try{
-    const lists = HYBRID_3BET_RANGES?.[seat]?.[opener] ?? null; // {open:[tokens], mix:[tokens]}
-    if (lists){
-      const openSet = new Set((lists.open ?? []).flatMap(expandToken));
-      const mixSet  = new Set((lists.mix  ?? []).flatMap(expandToken));
-      const m = new Map();
-      // Populate the 169 universe quickly:
-      for (let i=0;i<RANKS_ASC.length;i++){
-        for (let j=0;j<RANKS_ASC.length;j++){
-          let code;
-          if (i===j) code = RANKS_ASC[i]+RANKS_ASC[j];
-          else if (i<j){ code = RANKS_ASC[i]+RANKS_ASC[j]+'s'; }
-          else { code = RANKS_ASC[j]+RANKS_ASC[i]+'o'; }
-          if (openSet.has(code)) m.set(code,'open');
-          else if (mixSet.has(code)) m.set(code,'mix');
-          else m.set(code,'fold');
-        }
-      }
-      return m;
-    }
-  }catch(e){}
-
-  return new Map();
-}
-
-// 5) Build code->class for DEFEND/CALL (seat vs opener), prefer JSON then hybrid defend
-function classMapDefend(seat, opener){
-  // JSON BB defend uses defend[`BB_vs_${opener}`]; others may be vs_open key
-  try{
-    if (seat === 'BB'){
-      const key = `BB_vs_${opener}`;
-      const buck = RANGES_JSON?.defend?.[key];
-      if (buck){
-        const m = new Map();
-        for (const [code, freq] of Object.entries(buck)){
-          const w = freqToWeight(freq);
-          m.set(code, (w >= 1.0 ? 'open' : (w >= 0.5 ? 'mix':'fold')));
-        }
-        return m;
-      }
-    } else {
-      const key = `${seat}_vs_${opener}`;
-      const callObj = RANGES_JSON?.vs_open?.[key]?.call;
-      if (callObj){
-        const m = new Map();
-        for (const [code, freq] of Object.entries(callObj)){
-          const w = freqToWeight(freq);
-          m.set(code, (w >= 1.0 ? 'open' : (w >= 0.5 ? 'mix':'fold')));
-        }
-        return m;
-      }
-    }
-  }catch(e){}
-
-  // Hybrid defend fallback keyed by opener seat
-  try{
-    const lists = HYBRID_DEFEND_RANGES?.[opener] ?? null; // {open:[tokens], mix:[tokens]}
-    if (lists){
-      const openSet = new Set((lists.open ?? []).flatMap(expandToken));
-      const mixSet  = new Set((lists.mix  ?? []).flatMap(expandToken));
-      const m = new Map();
-      for (let i=0;i<RANKS_ASC.length;i++){
-        for (let j=0;j<RANKS_ASC.length;j++){
-          let code;
-          if (i===j) code = RANKS_ASC[i]+RANKS_ASC[j];
-          else if (i<j){ code = RANKS_ASC[i]+RANKS_ASC[j]+'s'; }
-          else { code = RANKS_ASC[j]+RANKS_ASC[i]+'o'; }
-          if (openSet.has(code)) m.set(code,'open');
-          else if (mixSet.has(code)) m.set(code,'mix');
-          else m.set(code,'fold');
-        }
-      }
-      return m;
-    }
-  }catch(e){}
-
-  return new Map();
-}
-
-// 6) Build a seat's PRE-FLOP code->weight map based on its role this hand
-function buildPreflopWeightMapForSeat(seat){
-  const role = (() => {
-    const op  = ENGINE?.preflop?.openerSeat ?? null;
-    const thb = ENGINE?.preflop?.threeBetterSeat ?? null;
-    const ccs = new Set(ENGINE?.preflop?.coldCallers ?? []);
-    if (seat === op)  return 'opener';
-    if (seat === thb) return 'three_better';
-    if (ccs.has(seat)) return 'cold_caller';
-    // unopened pot: use open map for the seat
-    return 'unopened';
-  })();
-
-  let classMap = new Map();
-  const opener = ENGINE?.preflop?.openerSeat ?? null;
-
-  if (role === 'opener' || role === 'unopened'){
-    classMap = classMapOpenForSeat(seat);
-  } else if (role === 'three_better'){
-    classMap = classMap3Bet(seat, opener);
-  } else if (role === 'cold_caller'){
-    classMap = classMapDefend(seat, opener);
-  }
-
-  // Convert class -> base weight
-  const base = new Map();
-  for (const [code, cls] of classMap.entries()) {
-    base.set(code, classToWeight(cls));
-  }
-
-  // Apply archetype multipliers by hand family
-  const archKey = seatArchetype(seat);
-  const mods = ARCHETYPE_MODIFIERS[archKey] ?? ARCHETYPE_MODIFIERS.TAG;
-  const out = new Map();
-  for (const [code, w] of base.entries()){
-    if (w <= 0) { out.set(code, 0); continue; }
-    const fam = handCodeFamily(code);
-    const mult = (mods[fam] ?? 1.0);
-    out.set(code, Math.max(0, w * mult));
-  }
-  return out;
-}
-
-// ===== Weighted sampler (code-level alias) + combo instantiation =====
-
-// Count available suit-combos for a code after blocking hero+board cards
-function availableComboCountForCode(code, blockedCards){
-  // pairs: 6 combos; suited non-pair: 4; offsuit non-pair: 12
-  // But remove any combos using blocked cards.
-  const combos = enumerateCombosForCode(code);
-  let cnt = 0;
-  for (const [c1,c2] of combos){
-    if (!containsCard(blockedCards, c1) && !containsCard(blockedCards, c2)) cnt++;
-  }
-  return cnt;
-}
-
-// Enumerate all 2-card combos for a given code (e.g., 'AKs','AKo','AA')
-function enumerateCombosForCode(code){
-  // Uses global SUITS and RANKS_ASC from your file
-  const r1 = code[0], r2 = code[1];
-  const suited = code.endsWith('s');
-  const offsuit = code.endsWith('o');
-  const pair = (r1 === r2);
-
-  const makeCard = (rank,suit) => ({ rank, suit });
-
-  const res = [];
-  if (pair){
-    // Choose any 2 distinct suits out of 4: 6 combos
-    for (let i=0;i<SUITS.length;i++){
-      for (let j=i+1;j<SUITS.length;j++){
-        res.push([ makeCard(r1, SUITS[i]), makeCard(r1, SUITS[j]) ]);
-      }
-    }
-    return res;
-  }
-  if (suited){
-    // Same suit: 4 combos
-    for (let s=0;s<SUITS.length;s++){
-      res.push([ makeCard(r1, SUITS[s]), makeCard(r2, SUITS[s]) ]);
-    }
-    return res;
-  }
-  // Offsuit distinct suits: 12 combos
-  for (let sa=0; sa<SUITS.length; sa++){
-    for (let sb=0; sb<SUITS.length; sb++){
-      if (sa === sb) continue;
-      res.push([ makeCard(r1, SUITS[sa]), makeCard(r2, SUITS[sb]) ]);
-    }
-  }
-  return res;
-}
-
-// Simple alias table for codes
-function buildAliasTable(codeWeightsMap, blockedCards){
-  // Build arrays of codes and adjusted weights = baseWeight * availableCombos
-  const codes = [];
-  const weights = [];
-  for (const [code, w] of codeWeightsMap.entries()){
-    if (w <= 0) continue;
-    const count = availableComboCountForCode(code, blockedCards);
-    if (count <= 0) continue;
-    codes.push(code);
-    weights.push(w * count);
-  }
-  if (codes.length === 0) return null;
-
-  // Normalize
-  const total = weights.reduce((a,b)=>a+b,0);
-  const probs = weights.map(w=>w/Math.max(1e-12,total));
-
-  // Vose alias setup
-  const n = probs.length;
-  const scaled = probs.map(p => p * n);
-  const small = [], large = [];
-  const alias = new Array(n).fill(0);
-  const prob  = new Array(n).fill(0);
-
-  for (let i=0;i<n;i++) (scaled[i] < 1 ? small : large).push(i);
-  while (small.length && large.length){
-    const l = small.pop(), g = large.pop();
-    prob[l] = scaled[l];
-    alias[l] = g;
-    scaled[g] = (scaled[g] + scaled[l]) - 1;
-    (scaled[g] < 1 ? small : large).push(g);
-  }
-  while (large.length){ prob[large.pop()] = 1; }
-  while (small.length){ prob[small.pop()] = 1; }
-
-  return { codes, prob, alias };
-}
-
-function aliasPick(tbl){
-  const n = tbl.prob.length;
-  const i = Math.floor(Math.random()*n);
-  const u = Math.random();
-  return (u < tbl.prob[i]) ? tbl.codes[i] : tbl.codes[tbl.alias[i]];
-}
-
-// Pick a concrete 2-card combo for a code, avoiding collisions with 'used' cards
-function pickComboForCode(code, usedCards){
-  const combos = enumerateCombosForCode(code);
-  // Shuffle small array for fairness
-  for (let i=combos.length-1;i>0;i--){
-    const j = Math.floor(Math.random()*(i+1));
-    [combos[i], combos[j]] = [combos[j], combos[i]];
-  }
-  for (const [c1,c2] of combos){
-    if (!containsCard(usedCards, c1) && !containsCard(usedCards, c2)){
-      return [c1,c2];
-    }
-  }
-  return null;
-}
-
-// ===== New range-aware Monte Carlo equity engine =====
-
-// Determine street from board length
-function streetFromBoardLen(n){ return (n===0?'preflop':(n===3?'flop':(n===4?'turn':'river'))); }
-
-// Live villain seats for this board (preflop uses participants when available)
-function liveVillainSeats(board){
-  const hero = currentPosition();
-  const n = board.length;
-  if (n === 0){
-    const parts = ENGINE?.preflop?.participants ?? [];
-    const seats = parts.filter(s => s !== hero);
-    if (seats.length > 0) return seats;
-    // Fallback: pick next seat in order (one opponent) to avoid 5-way bias
-    const order = ["UTG","HJ","CO","BTN","SB","BB"];
-    const iHero = order.indexOf(hero);
-    for (let k=1;k<order.length;k++){
-      const s = order[(iHero+k) % order.length];
-      if (s !== hero) return [s];
-    }
-    return ["BB"];
-  }
-  // Flop/turn/river: use survivors set (exclude hero)
-  try{
-    if (ENGINE.lastStreetComputed !== streetFromBoardLen(n)){
-      engineRecomputeSurvivorsForStreet(board); // keep in sync
-    }
-  }catch(e){}
-  const inSet = new Set(ENGINE?.survivors ?? []);
-  const out = [...inSet].filter(s => s !== hero);
-  return (out.length ? out : ["BB"]);
-}
-
-// Build per-seat alias tables once per street
-function buildSeatAliases(board){
-  const blocked = [...board, ...holeCards]; // hero+board blocked
-  const seats = liveVillainSeats(board);
-  const aliasBySeat = {};
-  const weightMapBySeat = {};
-  for (const seat of seats){
-  let wm = buildPreflopWeightMapForSeat(seat); // role-aware preflop
-
-// --- NEW: post-flop narrowing ---
-if (board.length >= 3){
-  wm = narrowPostflopWeights(wm, holeCards, board);
-}
-
-// Build alias table
-const tbl = buildAliasTable(wm, blocked);
-    if (tbl && tbl.codes.length){
-      aliasBySeat[seat] = tbl;
-      weightMapBySeat[seat] = wm;
-    }
-  }
-  return { seats, aliasBySeat, weightMapBySeat };
-}
-
-// Sample one concrete villain hand for a seat
-function sampleSeatHand(seat, tbl, used, debugSamples){
-  if (!tbl) return null;
-  const MAX_TRIES = 40;
-  for (let t=0;t<MAX_TRIES;t++){
-  const code = aliasPick(tbl);
-// Debug stats
-if (SHOW_SAMPLER_DEBUG){
-    if (!debugSamples[seat]) debugSamples[seat] = {};
-    debugSamples[seat][code] = (debugSamples[seat][code] ?? 0) + 1;
-}
-
-const picked = pickComboForCode(code, used);
-    if (picked){
-      return picked;
-    }
-  }
-  return null;
-}
-
-function newEquityEngineCompute(hole, board){
-
-// Track how often each code is sampled per seat
-  const debugSamples = {};  
-  const stage = streetFromBoardLen(board.length);
-  const trialsPreset = SETTINGS?.trialsByStage?.[stage] ?? 4000;
-  const trials = Math.max(250, trialsPreset); // keep a sane floor
-
-  let wins=0, ties=0, losses=0, equityAcc=0;
-  const catCount = new Map();
-  const { seats, aliasBySeat } = buildSeatAliases(board);
-
-  for (let t=0; t<trials; t++){
-    // Build used set per iteration
-    const used = [...hole, ...board];
-
-    // 1) Sample each live villain
-    const villains = [];
-    for (const seat of seats){
-      const tbl = aliasBySeat[seat];
-      const vh = sampleSeatHand(seat, tbl, used, debugSamples);
-      if (vh){
-        villains.push(vh);
-        used.push(vh[0], vh[1]);
-      }
-    }
-    if (villains.length === 0){
-      // Keep at least one opponent for training feedback
-      // Fallback: random two cards from remaining deck
-      const simDeck = createDeck().filter(c => !containsCard(used, c));
-      if (simDeck.length >= 2){
-        const i = Math.floor(Math.random()*simDeck.length);
-        let j = Math.floor(Math.random()*simDeck.length);
-        if (j===i) j = (j+1)%simDeck.length;
-        villains.push([simDeck[i], simDeck[j]]);
-        used.push(simDeck[i], simDeck[j]);
-      }
-    }
-
-    // 2) Complete the board uniformly
-    const rest = createDeck().filter(c => !containsCard(used, c));
-    const need = 5 - board.length;
-    const simBoard = [...board];
-    for (let k=0;k<need;k++){
-      const idx = Math.floor(Math.random()*rest.length);
-      simBoard.push(rest.splice(idx,1)[0]);
-    }
-
-    // 3) Evaluate
-    const heroScore = evaluate7(hole, simBoard);
-    let better=0, equal=0;
-    for (const v of villains){
-      const vs = evaluate7(v, simBoard);
-      const cmp = compareScores(heroScore, vs);
-      if (cmp < 0) better++;
-      else if (cmp === 0) equal++;
-    }
-
-    if (better > 0) { losses++; }
-    else if (equal > 0) { ties++; equityAcc += 1/(equal+1); }
-    else { wins++; equityAcc += 1; }
-
-    // Track hero's category distribution (optional UI)
-    const name = CAT_NAME[heroScore.cat] ?? 'High Card';
-    catCount.set(name, (catCount.get(name) ?? 0) + 1);
-  }
-
-  const catBreakdown = [];
-  for (const [k,v] of catCount.entries()){
-    catBreakdown.push({ name:k, pct:(v/trials)*100 });
-  }
-  // Keep same sort order you use today
-  const catOrder = ['Straight Flush','Four of a Kind','Full House','Flush','Straight','Three of a Kind','Two Pair','One Pair','High Card'];
-  catBreakdown.sort((a,b)=> {
-    const oi = catOrder.indexOf(a.name)-catOrder.indexOf(b.name);
-    return (oi!==0?oi:(b.pct-a.pct));
-  });
-
-  const equity = (equityAcc/trials)*100;
-
-if (SHOW_SAMPLER_DEBUG){
-  console.group("Sampler Debug — Top 10 Codes per Seat");
-  for (const seat of Object.keys(debugSamples)){
-    const entries = Object.entries(debugSamples[seat])
-      .sort((a,b)=>b[1]-a[1])
-      .slice(0,10);
-    console.log(seat, entries);
-  }
-  console.groupEnd();
-}
-  return {
-    equity,
-    winPct: (wins/trials)*100,
-    tiePct: (ties/trials)*100,
-    losePct:(losses/trials)*100,
-    trials,
-    catBreakdown,
-    numOpp: Math.max(1, seats.length)
-  };
-}
-
-// ===== Post-flop range narrowing =====
-// Remove weight from hands that are extremely unlikely to continue
-// given the board texture (cheap, mobile-safe narrowing).
-function narrowPostflopWeights(weightMap, hole, board){
-  const tex = analyzeBoard(board, hole); 
-  // detectStraightDrawFromAllCards(...) also available
-  const { openEnder, gutshot } = detectStraightDrawFromAllCards([...hole, ...board]);
-
-  // Keep families that plausibly continue:
-  const keepFamilies = new Set();
-  keepFamilies.add('pairs');
-  keepFamilies.add('suited_broadways');
-  keepFamilies.add('offsuit_broadways');
-  keepFamilies.add('suited_ax'); 
-  if (openEnder) keepFamilies.add('suited_connectors');
-  if (gutshot && tex.moistureBucket !== 'Dry') keepFamilies.add('suited_one_gappers');
-  if (tex.paired) keepFamilies.add('pairs');
-
-  const newMap = new Map();
-  for (const [code, w] of weightMap.entries()){
-    if (w <= 0){ newMap.set(code, 0); continue; }
-    const fam = handCodeFamily(code);
-    if (!keepFamilies.has(fam)){
-      newMap.set(code, w * 0.25);  // softly trim unlikely hands
-    } else {
-      newMap.set(code, w);
-    }
-  }
-  return newMap;
-}
 
 // Session-scoped state
 let SESSION_PERSONA_BY_LETTER = null;  // e.g., { A:'TAG', B:'STATION', ... } (villains only)
@@ -734,6 +125,16 @@ function markStreetReached(stage){
 }
 
 // Preflop update: decision + price context
+function updateHeroPreflop(decision, toCall){
+  // VPIP if hero voluntarily calls or raises
+  if (decision === 'call' || decision === 'raise') HERO_STATS.vpip++;
+
+  // If hero raises with no price to call → PFR; if raises facing a price → 3-bet
+  if (decision === 'raise') {
+    if (toCall > 0) HERO_STATS.threeBet++;
+    else HERO_STATS.pfr++;
+  }
+}
 
 function updateHeroPreflop(decision /*, _toCall */){
 // VPIP counts both opens and calls
@@ -903,7 +304,6 @@ const kpiCallEl = document.getElementById("kpiToCall");
 const kpiTimerEl = document.getElementById("kpiTimer");
 // Optional chip (will be null if you didn't add it in HTML; code no-ops then)
 const kpiEquitySwingEl = document.getElementById("kpiEquitySwing");
-const kpiScenarioEl = document.getElementById("kpiScenario");
 
 const bottomBar = document.getElementById("bottomBar");
 const barPotOdds = document.getElementById("barPotOdds");
@@ -913,17 +313,14 @@ const barNext = document.getElementById("barNextBtn");
 const hintDetails = document.getElementById("hintDetails");
 const hintsDetailBody = document.getElementById("hintsDetailBody");
 
-// ===== Advanced Toggle for Sampler Debug =====
-let SHOW_SAMPLER_DEBUG = false;
-document.getElementById('advToggleSampler')?.addEventListener('change', e=>{
-  SHOW_SAMPLER_DEBUG = e.target.checked;
-});
-
-
 // ==================== Cards & deck ====================
 const SUITS = ["\u2660", "\u2665", "\u2666", "\u2663"]; // ♠ ♥ ♦ ♣
 const RANKS = ["2","3","4","5","6","7","8","9","T","J","Q","K","A"];
 const RANK_TO_VAL = { '2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'T':10,'J':11,'Q':12,'K':13,'A':14 };
+
+// === Rank ordering for hand-code generation ===
+const RANKS_ASC = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"];
+const RANK_INDEX = Object.fromEntries(RANKS_ASC.map((r, i) => [r, i]));
 
 function createDeck(){
   const d = [];
@@ -975,7 +372,8 @@ function renderCards(){
 function computePotOdds(pot, callAmount){ if (callAmount<=0) return 0; return (callAmount/(pot+callAmount))*100; }
 function updatePotInfo(){
   pot = toStep5(pot); toCall = toStep5(toCall);
-  const stageName = STAGES[currentStageIndex].toUpperCase();
+  const stageValue = STAGES?.[currentStageIndex] ?? "";
+  const stageName = stageValue ? stageValue.toUpperCase() : "—";
   if (potSizeEl) potSizeEl.textContent = pot.toFixed(0);
   if (toCallEl) toCallEl.textContent = toCall.toFixed(0);
   if (stageLabelEl) stageLabelEl.textContent = stageName;
@@ -992,13 +390,6 @@ function updatePotInfo(){
   const pOdds = computePotOdds(pot, toCall);
   if (barPotOdds) barPotOdds.textContent = isFinite(pOdds) ? `Pot odds ${pOdds.toFixed(1)}%` : 'Pot odds —';
   // Keep Bet/Raise label + size rows in sync
-// Scenario → Mobile KPI chip (safe even if scenario is null)
-if (kpiScenarioEl) {
-  const label = (scenario && scenario.label) ? String(scenario.label) : "—";
-  kpiScenarioEl.textContent = `📜 ${label}`;
-  kpiScenarioEl.title = label;            // tooltip for truncated text
-  kpiScenarioEl.setAttribute('aria-label', `Scenario: ${label}`);
-}
   updateDecisionLabels();
 }
 
@@ -1553,333 +944,177 @@ const SETTINGS = {
   simQualityPreset: 'Balanced',
   trialsByStage: { preflop: 4000, flop: 6000, turn: 8000, river: 12000 }
 };
-
 const TRIALS_PRESETS = {
   Mobile:   { preflop: 2000, flop: 4000, turn: 6000, river: 8000 },
   Balanced: { preflop: 4000, flop: 6000, turn: 8000, river: 12000 },
   Accurate: { preflop: 8000, flop: 12000, turn: 16000, river: 20000 }
 };
+function popRandomCard(arr){ const i=Math.floor(Math.random()*arr.length); return arr.splice(i,1)[0]; }
+function preflopWeight(c1,c2){
+  const v1=RANK_TO_VAL[c1.rank], v2=RANK_TO_VAL[c2.rank];
+  const hi=Math.max(v1,v2), lo=Math.min(v1,v2);
+  let score=0;
+  if (hi>=12) score+=1.0;
+  if (lo>=11) score+=0.7; else if (lo>=10) score+=0.5;
+  if (v1===v2){ score+=0.9; if (hi>=10) score+=0.1; }
+  if (c1.suit===c2.suit) score+=0.25;
+  const gap = Math.abs(v1-v2);
+  if (gap===1) score+=0.15; else if (gap===2) score+=0.07;
+  const maxScore=3.0, base=0.05;
+  return Math.min(1, base + (score/maxScore)*(1-base));
+}
+function drawBiasedOpponentHand(d){
+  const maxTries=200;
+  for (let t=0;t<maxTries;t++){
+    const i = Math.floor(Math.random()*d.length);
+    let j = Math.floor(Math.random()*d.length);
+    if (j===i) continue;
+    const c1=d[i], c2=d[j];
+    if (Math.random()<=preflopWeight(c1,c2)){
+      const hi=Math.max(i,j), lo=Math.min(i,j);
+      const second = d.splice(hi,1)[0];
+      const first = d.splice(lo,1)[0];
+      return [first,second];
+    }
+  }
+  return [popRandomCard(d), popRandomCard(d)];
+}
 
-// ===== Feature flags =====
-const FEATURE_FLAGS = {
-  // Route computeEquityStats(...) through the new range-aware MC engine
-  // (can flip to false to revert to legacy in one line)
-  equityEngineV2: true
+// ==================== Postflop Engine v1 (deterministic survivors) ====================
+// Keeps villain cards fixed (TABLE.seats) and decides who continues on each street.
+// Survivors are re-evaluated at flop/turn; river survivors always go to showdown.
+
+const ENGINE = {
+    survivors: new Set(),
+    survivorsByStreet: { flop: [], turn: [], river: [] },
+    lastStreetComputed: 'preflop',
+    preflop: { openerSeat: null, threeBetterSeat: null, participants: [] },
+
+    // track statuses: "in", "folded_now", "folded_prev"
+    statusBySeat: {
+        UTG: 'in',
+        HJ: 'in',
+        CO: 'in',
+        BTN: 'in',
+        SB: 'in',
+        BB: 'in'
+    },
+
+villainRange: {
+    preflop: 100,   // 100% of range before flop
+    flop:    100,   // will compress after villain folds/calls/bets
+    turn:    100,
+    river:   100
+},
+
 };
 
-function popRandomCard(arr){ const i=Math.floor(Math.random()*arr.length); return arr.splice(i,1)[0]; }
+function updateVillainRange(stage, actionType) {
+    // Safety: if stage invalid, do nothing
+    if (!ENGINE.villainRange) return;
 
-// ==================== Preflop Engine — JSON‑driven, GTO‑accurate (Option 1A) ====================
-// Uses only RANGES_JSON (open / three_bet / defend / vs_open) for all pre‑flop actions.
-// One pass BEFORE Hero, one pass AFTER Hero — no wrap-around, no second turns (no cycling).
+    const rng = ENGINE.villainRange;
 
-// --- JSON freq → class ('open' | 'mix' | 'fold') consistent with freqToWeight thresholds ---
-function freqToClassLocal(freq){
-  if (freq == null) return 'fold';
-  const f = Number(freq);
-  if (!Number.isFinite(f)) return 'fold';
-  if (f >= 0.67) return 'open';
-  if (f >= 0.15) return 'mix';
-  return 'fold';
-}
-function jsonIn(bucket, code){
-  if (!bucket) return false;
-  const freq = bucket[code];
-  const cls = freqToClassLocal(freq);
-  return (cls === 'open' || cls === 'mix');
-}
+    // Normalize stage names
+    const st = stage.toLowerCase();  // 'flop', 'turn', 'river'
 
-// --- JSON lookups ---
-function jsonWouldOpen(seat, code){
-  const b = RANGES_JSON?.open?.[seat];
-  return jsonIn(b, code);
-}
-function jsonWould3Bet(seat, opener, code){
-  const key = `${seat}_vs_${opener}`;
-  const b = RANGES_JSON?.three_bet?.[key];
-  return jsonIn(b, code);
-}
-// Defend call vs open: BB uses 'defend', others use 'vs_open.<seat>_vs_<opener>.call'
-function jsonWouldCallVsOpen(seat, opener, code){
-  if (seat === 'BB'){
-    const key = `BB_vs_${opener}`;
-    const b = RANGES_JSON?.defend?.[key];
-    return jsonIn(b, code);
-  }
-  const key = `${seat}_vs_${opener}`;
-  const b = RANGES_JSON?.vs_open?.[key]?.call;
-  return jsonIn(b, code);
-}
+    // Start with previous street value
+    // (Flop compresses from preflop, turn compresses from flop, etc.)
+    let prev = 100;
+    if (st === "flop")  prev = rng.preflop;
+    if (st === "turn")  prev = rng.flop;
+    if (st === "river") prev = rng.turn;
 
-// --- Seat/turn helpers ---
-function idxOfSeat(seat){ return ACTION_ORDER.indexOf(seat); } // "UTG","HJ","CO","BTN","SB","BB"
-function forSeatsBeforeHero(heroSeat){
-  const out = [];
-  for (const s of ACTION_ORDER){ if (s === heroSeat) break; out.push(s); }
-  return out;
-}
-function forSeatsAfterHero(heroSeat){
-  const i = idxOfSeat(heroSeat);
-  return ACTION_ORDER.slice(i+1); // no wrap-around
-}
+    let next = prev;  // will adjust below
 
-// --- Shared string label for UI coaching ---
-function buildPreflopLabel(openerSeat, openToBb, threeBetterSeat, threeBetToBb, coldCallers) {
-  // Backfill opener size if seat exists but value is missing
-  const safeOpenToBb = (openerSeat && openToBb == null)
-    ? Number(standardOpenSizeBb(openerSeat))
-    : Number(openToBb);
 
-  if (openerSeat && threeBetterSeat) {
-    const openX  = Number.isFinite(safeOpenToBb)   ? safeOpenToBb.toFixed(1) : "—";
-    const threeX = Number.isFinite(threeBetToBb)   ? Number(threeBetToBb).toFixed(1) : "—";
-    return `${openerSeat} opened ${openX}x · ${threeBetterSeat} 3-bet ${threeX}x`;
-  }
+    // ============================
+    // FLOP RANGE UPDATES
+    // ============================
+    if (st === "flop") {
 
-  if (openerSeat) {
-    const openX = Number.isFinite(safeOpenToBb) ? safeOpenToBb.toFixed(1) : "—";
-    const cc    = (Array.isArray(coldCallers) && coldCallers.length) ? " · cold call" : "";
-    return `${openerSeat} opened ${openX}x${cc}`;
-  }
+        if (actionType === "fold") next = 0;
 
-  return "Preflop";
-}
+        // A flop check barely changes the range — still very wide
+        if (actionType === "check") next = prev * 0.90;     // ~10% tighter
 
-// --- NEW: Pre‑flop simulate BEFORE hero (pure JSON) ---
-function preflopSimulateBeforeHero(){
-  const heroSeat = currentPosition();
-  const sb = toStep5(BLINDS.sb), bb = toStep5(BLINDS.bb);
+        // A flop call removes weak air hands, keeps mid-strength + draws
+        if (actionType === "call")  next = prev * 0.70;
 
-  let potLocal = toStep5(sb + bb);
-  let openerSeat = null, openToBb = null;
-  let threeBetterSeat = null, threeBetToBb = null;
-  const coldCallers = [];
+        // A flop bet is tighter — representing hands with equity or initiative
+        if (actionType === "bet")   next = prev * 0.55;
 
-  // reset statuses
-  Object.keys(ENGINE.statusBySeat).forEach(seat => { ENGINE.statusBySeat[seat] = "in"; });
-
-  for (const s of forSeatsBeforeHero(heroSeat)){
-    const h = seatHand(s);
-    if (!h || !h.length) { ENGINE.statusBySeat[s] = "folded_now"; continue; }
-    const code = handToCode(h);
-
-    // No opener yet → seat may open (JSON/explicit/hybrid via canOpen)
-    if (!openerSeat){
-      if (canOpen(s, code)){
-        openerSeat = s;
-        openToBb = standardOpenSizeBb(s);
-        const raiseTo = toStep5(openToBb * bb);
-        potLocal = contributeRaiseTo(potLocal, raiseTo, s);
-      } else {
-        ENGINE.statusBySeat[s] = "folded_now";
-      }
-      continue;
+        // A flop raise is extremely tight (value + semi-bluffs)
+        if (actionType === "raise") next = prev * 0.35;
     }
 
-    // opener exists, no 3-bettor yet → (JSON/hybrid) 3-bet first; else call; else fold
-    if (!threeBetterSeat){
-      if (inThreeBetBucket(s, openerSeat, code)){
-        threeBetterSeat = s;
-        threeBetToBb = threeBetSizeBb(openerSeat, s, openToBb);
-        const rTo = toStep5(threeBetToBb * bb);
-        potLocal = contributeRaiseTo(potLocal, rTo, s);
-      } else if (inCallBucket(s, openerSeat, code)){
-        const rTo = toStep5(openToBb * bb);
-        potLocal = contributeCallTo(potLocal, rTo, s);
-        coldCallers.push(s);
-      } else {
-        ENGINE.statusBySeat[s] = "folded_now";
-      }
-      continue;
+
+    // ============================
+    // TURN RANGE UPDATES
+    // ============================
+    if (st === "turn") {
+
+        if (actionType === "fold") next = 0;
+
+        // Turn check = capped range
+        if (actionType === "check") next = prev * 0.85;
+
+        // Turn call = medium-strength range + draws
+        if (actionType === "call")  next = prev * 0.60;
+
+        // Turn bet = stronger top pairs, draws, and bluffs → polarizing
+        if (actionType === "bet")   next = prev * 0.45;
+
+        // Turn raise = very polar (strongest value + some bluffs)
+        if (actionType === "raise") next = prev * 0.25;
     }
 
-    // opener + 3-bettor already exist → allow flats vs 3-bet
-    if (inCallBucket(s, openerSeat, code)){
-      const rTo = toStep5(threeBetToBb * bb);
-      potLocal = contributeCallTo(potLocal, rTo, s);
-      coldCallers.push(s);
-    } else {
-      ENGINE.statusBySeat[s] = "folded_now";
-    }
-  }
 
-  // Compute hero's price to call
-  const heroPostedBlind = postedBlindFor(heroSeat);
-  let toCallLocal = 0;
-  if (!openerSeat){
-    toCallLocal = (heroSeat === 'BB') ? 0 : (heroSeat === 'SB' ? Math.max(0, bb - sb) : bb);
-  } else if (threeBetterSeat){
-    const rTo = toStep5(threeBetToBb * bb);
-    toCallLocal = Math.max(0, rTo - heroPostedBlind);
-  } else {
-    const rTo = toStep5(openToBb * bb);
-    toCallLocal = Math.max(0, rTo - heroPostedBlind);
-  }
+    // ============================
+    // RIVER RANGE UPDATES
+    // ============================
+    if (st === "river") {
 
-  // Record preflop context
-  ENGINE.preflop.openerSeat   = openerSeat ?? null;
-  ENGINE.preflop.threeBetterSeat = threeBetterSeat ?? null;
-  ENGINE.preflop.coldCallers  = Array.from(new Set(coldCallers));
-  ENGINE.preflop.openToBb     = (openToBb == null ? null : Number(openToBb));
-  ENGINE.preflop.threeBetToBb = (threeBetToBb == null ? null : Number(threeBetToBb));
+        if (actionType === "fold") next = 0;
 
-  // Participants (villain side so far)
-  ENGINE.preflop.participants = (() => {
-    const p = new Set();
-    if (openerSeat) p.add(openerSeat);
-    if (threeBetterSeat) p.add(threeBetterSeat);
-    coldCallers.forEach(x => p.add(x));
-    return Array.from(p);
-  })();
+        // River check = maximally capped — usually calling/bluff-catching hands
+        if (actionType === "check") next = prev * 0.75;
 
-  const label = buildPreflopLabel(openerSeat, openToBb, threeBetterSeat, threeBetToBb, coldCallers);
-  return { potLocal, toCallLocal, openerSeat, openToBb, threeBetterSeat, threeBetToBb, coldCallers, label };
-}
-// --- LAST‑AGGRESSOR policy (no cycling) ---
-// We DO NOT wrap back around the table. After Hero acts, we scan seats AFTER Hero.
-// If a NEW aggressor appears after Hero, we allow seats after them to respond once, then end.
-// If the prior aggressor (before Hero) must respond (e.g., after‑Hero squeeze), we resolve exactly one required response // and end.
+        // River call = strong bluff-catchers and medium value
+        if (actionType === "call")  next = prev * 0.55;
 
-function preflopResolveAfterHero(decision){
-  const hero = currentPosition();
-  const sb = toStep5(BLINDS.sb), bb = toStep5(BLINDS.bb);
-  let opener = ENGINE.preflop.openerSeat ?? null;
-  let threeBetter = ENGINE.preflop.threeBetterSeat ?? null;
-  let openToBb = ENGINE.preflop.openToBb ?? null;
-  let threeBetToBb = ENGINE.preflop.threeBetToBb ?? null;
+        // River bet = polarized (nuts + bluffs)
+        if (actionType === "bet")   next = prev * 0.40;
 
-  function keepIn(seat){ ENGINE.statusBySeat[seat] = "in"; }
-  function noteParticipant(seat){
-    ENGINE.preflop.participants = Array.from(new Set([...(ENGINE.preflop.participants ?? []), seat]));
-  }
-
-  let lastAggressor = threeBetter ?? opener ?? null;
-
-  // === If Hero 4-bet into a villain 3-bet, resolve one decision and end
-  if (decision === 'raise' && opener && threeBetter && threeBetter !== hero){
-    const h = seatHand(threeBetter);
-    const code = h ? handToCode(h) : null;
-    const canDefend4b = code ? inThreeBetBucket(threeBetter, opener, code) : false;
-
-    const threeTo = toStep5((threeBetToBb ?? ((openToBb ?? 2.2) * ((idxOfSeat(threeBetter)>idxOfSeat(opener)) ? 3.0 : 4.0))) * bb);
-    const heroMult = (heroActions?.preflop?.sizeMult != null) ? Number(heroActions.preflop.sizeMult) : 2.4;
-    const fourTo = toStep5(heroMult * (threeTo / bb) * bb);
-
-    if (canDefend4b){
-      pot = contributeCallTo(pot, fourTo, threeBetter);
-      keepIn(threeBetter); noteParticipant(threeBetter);
-      scenario = { label: `${opener} opened ${(openToBb??standardOpenSizeBb(opener)).toFixed?.(1) ?? '—'}x · ${threeBetter} 3‑bet · Hero 4‑bet`, potFactor: 0 };
-    } else {
-      ENGINE.statusBySeat[threeBetter] = "folded_now";
-      scenario = { label: `${opener} opened ${(openToBb??standardOpenSizeBb(opener)).toFixed?.(1) ?? '—'}x · ${threeBetter} 3‑bet · Hero 4‑bet (fold)`, potFactor: 0 };
-    }
-    toCall = 0; updatePotInfo();
-    return;
-  }
-
-  // === Seats after Hero (single pass, no wrap)
-  const tail = forSeatsAfterHero(hero);
-  let needsPriorAggressorResolve = false;
-  let priorAggressorToResolve = null;
-
-  // Running "raise-to" for tail seats
-  let currentPriceTo = 0;
-  if (opener && threeBetter){
-    currentPriceTo = toStep5((threeBetToBb ?? 0) * bb);
-  } else if (opener){
-    currentPriceTo = toStep5((openToBb ?? 0) * bb);
-  } else {
-    currentPriceTo = 0;
-  }
-
-  for (const s of tail){
-    if (s === lastAggressor) break;
-    const h = seatHand(s);
-    if (!h || !h.length) { ENGINE.statusBySeat[s] = "folded_now"; continue; }
-    const code = handToCode(h);
-
-    // No opener yet → allow opens after Hero
-    if (!opener){
-      if (canOpen(s, code)){
-        opener = s; lastAggressor = s;
-        openToBb = standardOpenSizeBb(s);
-        const raiseTo = toStep5(openToBb * bb);
-        pot = contributeRaiseTo(pot, raiseTo, s);
-        scenario = { label: `${s} opened ${openToBb.toFixed(1)}x`, potFactor: 0 };
-        currentPriceTo = raiseTo;
-        keepIn(s); noteParticipant(s);
-      } else {
-        ENGINE.statusBySeat[s] = "folded_now";
-      }
-      continue;
+        // River raise = insanely polar (nuts or bluff)
+        if (actionType === "raise") next = prev * 0.20;
     }
 
-    // Opener exists, no 3-bettor yet → possible 3-bet or call
-    if (opener && !threeBetter){
-      if (inThreeBetBucket(s, opener, code)){
-        threeBetter = s; lastAggressor = s;
-        threeBetToBb = threeBetSizeBb(opener, s, openToBb);
-        const rTo = toStep5(threeBetToBb * bb);
-        pot = contributeRaiseTo(pot, rTo, s);
-        // Tentative label for now; will be final if they don't fold later
-        scenario = { label: `${opener} opened ${openToBb.toFixed(1)}x · ${s} 3‑bet ${threeBetToBb.toFixed(1)}x`, potFactor: 0 };
-        needsPriorAggressorResolve = true; priorAggressorToResolve = opener;
-        currentPriceTo = rTo;
-        keepIn(s); noteParticipant(s);
-      } else if (inCallBucket(s, opener, code)){
-        const rTo = toStep5(openToBb * bb);
-        pot = contributeCallTo(pot, rTo, s);
-        keepIn(s); noteParticipant(s);
-      } else {
-        ENGINE.statusBySeat[s] = "folded_now";
-      }
-      continue;
-    }
 
-    // Opener + 3-bettor exist → allow flats vs 3-bet
-    if (opener && threeBetter){
-      if (inCallBucket(s, opener, code)){
-        const rTo = toStep5(threeBetToBb * bb);
-        pot = contributeCallTo(pot, rTo, s);
-        keepIn(s); noteParticipant(s);
-      } else {
-        ENGINE.statusBySeat[s] = "folded_now";
-      }
-      continue;
-    }
-  }
+    // Clamp & write values
+    next = Math.max(0, Math.min(100, next));
 
-  // If a squeeze occurred, resolve opener once; if they fold, update label accordingly
-  if (needsPriorAggressorResolve && priorAggressorToResolve){
-    const s = priorAggressorToResolve;
-    const h = seatHand(s);
-    const code = h ? handToCode(h) : null;
-    const canDefend = code ? (inThreeBetBucket(s, opener, code) || inCallBucket(s, opener, code)) : false;
-
-    if (canDefend){
-      const rTo = toStep5(threeBetToBb * bb);
-      pot = contributeCallTo(pot, rTo, s);
-      keepIn(s); noteParticipant(s);
-      // keep prior 3-bet label (they continued)
-    } else {
-      ENGINE.statusBySeat[s] = "folded_now";
-      // Overwrite any earlier "3-bet" wording to reflect the fold to the squeeze
-      scenario = { label: `${opener} opened ${openToBb.toFixed(1)}x · ${threeBetter} 3‑bet ${threeBetToBb.toFixed(1)}x · opener folded`, potFactor: 0 };
-    }
-  }
-
-  // End preflop with no price for Hero
-  toCall = 0; updatePotInfo();
-
-  // Include hero among preflop participants if hero didn’t fold
-  const finalP = new Set(ENGINE.preflop.participants ?? []);
-  if (!handHistory.some(h => h.stage === 'preflop' && h.decision === 'fold')) finalP.add(hero);
-  ENGINE.preflop.participants = Array.from(finalP);
+    if (st === "flop")  rng.flop  = next;
+    if (st === "turn")  rng.turn  = next;
+    if (st === "river") rng.river = next;
 }
 
+// === Module 3 Step 4 — Villain range context helpers ===
+function rangeLabelFromPct(pct){
+  if (pct >= 80) return "wide";
+  if (pct >= 55) return "mid-wide";
+  if (pct >= 35) return "tight/condensed";
+  return "polar/tight";
+}
 
-// ==================== END — Preflop Engine (JSON‑driven) ====================
-
+function villainRangeContextLine(stage){
+  // stage: 'flop'|'turn'|'river'
+  const pct = Math.max(0, Math.min(100, Number(ENGINE?.villainRange?.[stage] ?? 100)));
+  const label = rangeLabelFromPct(pct);
+  // Short, solver-flavoured line you can append to notes
+  const line = `Villain range ≈ ${pct.toFixed(0)}% (${label}).`;
+  return { pct, label, line };
+}
 
 // Convenience lookup for a villain seat's actual cards
 function seatHand(seat){
@@ -2037,23 +1272,16 @@ function countOpponentsInPlay(board){
 
 // Small hook from Phase 1 to remember opener / 3-bettor
 function engineSetPreflopContext(openerSeat, threeBetterSeat, coldCallers, openToBb){
-  // Backfill opener size if seat exists but size is missing
-  const backfillOpenToBb = (openerSeat && (openToBb == null))
-    ? Number(standardOpenSizeBb(openerSeat))
-    : (openToBb == null ? null : Number(openToBb));
-
-  ENGINE.preflop.openerSeat   = openerSeat ?? null;
+  ENGINE.preflop.openerSeat = openerSeat ?? null;
   ENGINE.preflop.threeBetterSeat = threeBetterSeat ?? null;
-  ENGINE.preflop.coldCallers  = Array.isArray(coldCallers) ? coldCallers.slice() : [];
-  ENGINE.preflop.openToBb     = backfillOpenToBb; // ensure size present with opener
-
+  ENGINE.preflop.coldCallers = Array.isArray(coldCallers) ? coldCallers.slice() : [];
+  ENGINE.preflop.openToBb = (openToBb == null ? null : Number(openToBb)); // NEW: opener raise-to (in BB)
   // Keep a flat list of preflop participants — used if the hand ends preflop
   const parts = [];
   if (ENGINE.preflop.openerSeat) parts.push(ENGINE.preflop.openerSeat);
   if (ENGINE.preflop.threeBetterSeat) parts.push(ENGINE.preflop.threeBetterSeat);
   (ENGINE.preflop.coldCallers ?? []).forEach(s => parts.push(s));
   ENGINE.preflop.participants = [...new Set(parts)];
-
   ENGINE.survivors.clear();
   ENGINE.survivorsByStreet = { flop: [], turn: [], river: [] };
   ENGINE.lastStreetComputed = 'preflop';
@@ -2109,12 +1337,75 @@ function villainConnected(hole, boardAtStreet){
   return pairWithBoard || hasFD || oesd;
 }
 
+function sampleShowdownOpponents(baselineCount /*, board, maybeOppHands, maybeDeck */){
+  // Deterministic: include all baseline opponents; no stochastic continuation.
+  // (computeEquityStats() already sizes baselineCount from remaining players.)
+  // Clamp to a small, sane, finite integer [0..9] to avoid invalid lengths
+ let n = Number.isFinite(baselineCount) ? baselineCount : 0;
+ n = Math.floor(Math.max(0, Math.min(9, n)));
+ return Array.from({ length: n }, (_, i) => i);
 
-// TRAINING MODE: compute equity via new range-aware engine
-// V2‑ONLY: permanent range‑aware Monte Carlo engine
+}
 
+
+function computeEquityStatsLegacy(hole, board, numOppOverride = null){
+  const stage = stageFromBoard(board);
+  const trials = SETTINGS.trialsByStage[stage] ?? 4000;
+
+  // Use override if provided, otherwise fall back to baseline
+  const BASE_OPP = (numOppOverride != null ? Math.max(0, numOppOverride) : SETTINGS.sim.playersBaseline);
+
+  let wins=0, ties=0, losses=0; let equityAcc=0;
+  const catCount = new Map();
+
+  for (let t=0;t<trials;t++){
+    const simDeck = createDeck().filter(c => !containsCard(hole,c) && !containsCard(board,c));
+    const opponents = [];
+    for (let i=0;i<BASE_OPP;i++) opponents.push(drawBiasedOpponentHand(simDeck));
+
+    const survivorsIdx = sampleShowdownOpponents(BASE_OPP, board, opponents, simDeck);
+    const survivors = survivorsIdx.map(i => opponents[i]);
+    if (survivors.length===0 && BASE_OPP>0) survivors.push(opponents[0]);
+
+    const need = 5-board.length;
+    const simBoard = [...board];
+    for (let i=0;i<need;i++) simBoard.push(popRandomCard(simDeck));
+
+    const heroScore = evaluate7(hole, simBoard);
+    let better=0, equal=0;
+    for (let i=0;i<survivors.length;i++){
+      const villainScore = evaluate7(survivors[i], simBoard);
+      const cmp = compareScores(heroScore, villainScore);
+      if (cmp<0) better++;
+      else if (cmp===0) equal++;
+    }
+    if (better>0) losses++;
+    else if (equal>0){ ties++; equityAcc += 1/(equal+1); }
+    else { wins++; equityAcc += 1; }
+
+    const cat = CAT_NAME[heroScore.cat];
+    catCount.set(cat, (catCount.get(cat)??0)+1);
+  }
+
+  const winPct = (wins/trials)*100, tiePct=(ties/trials)*100, losePct=(losses/trials)*100;
+  const equity = (equityAcc/trials)*100;
+  const catBreakdown=[];
+  for (const [k,v] of catCount.entries()) catBreakdown.push({ name:k, pct:(v/trials)*100 });
+  const catOrder = ['Straight Flush','Four of a Kind','Full House','Flush','Straight','Three of a Kind','Two Pair','One Pair','High Card'];
+  catBreakdown.sort((a,b)=>{ const oi = catOrder.indexOf(a.name)-catOrder.indexOf(b.name); return oi!==0?oi:(b.pct-a.pct); });
+  return { equity, winPct, tiePct, losePct, trials, catBreakdown, numOpp: Math.max(1, BASE_OPP) }; 
+}
+
+// TRAINING MODE: always compute equity vs random opponents,
+// but size the field to match how many players are still in.
+// We DO NOT look at (or remove) villains' actual hole cards here.
 function computeEquityStats(hole, board){
-    return newEquityEngineCompute(hole, board);
+  let numOpp = countOpponentsInPlay(board);  // from engine/discs, not hole cards
+  if (numOpp === 0) {
+    // For training, keep at least 1 opponent so equities remain meaningful pre-showdown
+    numOpp = 1;
+  }
+  return computeEquityStatsLegacy(hole, board, numOpp);
 }
 
 // ==================== Scoring & decisions ====================
@@ -2215,507 +1506,176 @@ const POS_ONE_LINERS = {
   BB: "Big Blind — closes preflop action; defend wide vs small opens."
 };
 
-// Hybrid ranges (Open)
-const RANKS_ASC = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"];
-const RANK_INDEX = Object.fromEntries(RANKS_ASC.map((r,i)=>[r,i]));
-const HYBRID_RANGES = {
-  UTG: { open:["TT+","AQs+","AKo","KQs"], mix:["AJs","99"] },
-  HJ:  { open:["99+","AJs+","AQo+","ATs-A5s","KQs","KJs","QJs","T9s","98s","KQo"], mix:[] },
-  CO:  { open:["88+","A9s-A2s","KTs+","QTs+","JTs-T8s","97s","AJo","KJo","KQo","QJo"], mix:[] },
-  BTN: { open:["22+","A2s+","K9s+","Q9s+","J9s+","T9s-54s","A2o+","KTo+","QTo+","JTo"], mix:[] },
-  SB:  { open:["22+","A2s+","K9s+","Q9s+","J9s+","T9s-65s","A2o+","KTo+","QTo+","JTo"], mix:[] }
-};
-
 function hasNonEmptySeatBucket(obj, seat) {
   const b = obj?.[seat];
   return b && typeof b === 'object' && Object.keys(b).length > 0;
 }
 
-// ===== EXPLICIT OPEN RANGES =====
-
-
 // **** MODIFIED to prefer JSON frequencies when loaded ****
 
-function getClassMapForSeat(seat){
- // 1) Prefer imported JSON only if the seat bucket is non-empty
-try{
-  if (hasNonEmptySeatBucket(RANGES_JSON?.open, seat)){
-    return mapFromFreqBucket(RANGES_JSON.open[seat]);
-  }
-}catch(e){/* fallback */ }
-
-  // 2) Your explicit-first logic
-  const exp = (typeof EXPLICIT_OPEN !== 'undefined') ? EXPLICIT_OPEN[seat] : undefined;
-  if (exp && (exp.OPEN_GREEN?.size || exp.OPEN_AMBER?.size)) {
-    const map = new Map();
-    for (let i = 0; i < RANKS_ASC.length; i++) {
-      for (let j = 0; j < RANKS_ASC.length; j++) {
-        const r1 = RANKS_ASC[i], r2 = RANKS_ASC[j];
-        let code;
-        if (i === j) code = r1 + r2;
-        else if (i < j) code = r1 + r2 + 's';
-        else code = r2 + r1 + 'o';
-        let cls = 'fold';
-        if (exp.OPEN_GREEN?.has(code)) cls = 'open';
-        else if (exp.OPEN_AMBER?.has(code)) cls = 'mix';
-        map.set(code, cls);
-      }
+function getClassMapForSeat(seat) {
+    // JSON-only. If no JSON for this seat, return null.
+    try {
+        if (hasNonEmptySeatBucket(RANGES_JSON?.open, seat)) {
+            return mapFromFreqBucket(RANGES_JSON.open[seat]);
+        }
+    } catch (e) {
+        /* ignore */
     }
-    return map;
-  }
-  // 3) Fallback to hybrid tokens
-  return buildClassMapForPos(seat);
-}
 
-
-// ... (keep your EXPLICIT_OPEN block exactly as you have it) ...
-// Use explicit open sets first; if a seat isn't explicitly defined, fall back to hybrid tokens.
-
-// ---------- Helpers for explicit block (keep your existing helper functions) ----------
-// ... (keep addPairs/addAllSuitedBroadways/... etc) ...
-
-/* ============================================================
-   EXPLICIT OPEN RANGES (RFI • 6-max • ~100bb) — GREEN / AMBER
-   - GREEN = pure/mostly-pure opens
-   - AMBER = mixed / low-frequency opens (kept from earlier suggestion)
-   - Built with deterministic helpers (no regex/token parsing).
-   Paste this right under your // Hybrid ranges (Open) section.
-   ============================================================ */
-
-// ---------- Helpers (deterministic) ----------
-const BW = ["A","K","Q","J","T"]; // broadway ranks
-function rIdx(r){ return RANKS_ASC.indexOf(r); } // smaller index = stronger (A=0 ... 2=12)
-
-// Add AA..minPair (e.g., minPair='2' or '22' -> down to 22)
-function addPairs(set, minPair="22"){
-  const min = (minPair.length===2 ? minPair[0] : minPair);
-  const stop = rIdx(min);
-  for (let i=0; i<=stop; i++) {
-    const rr = RANKS_ASC[i];
-    set.add(rr+rr);
-  }
-}
-
-// Add all suited broadways (AKs, AQs, ..., KQs, KJs, ..., QJs, QTs, JTs)
-function addAllSuitedBroadways(set){
-  for (let i=0;i<BW.length;i++){
-    for (let j=i+1;j<BW.length;j++){
-      set.add(BW[i] + BW[j] + 's');
-    }
-  }
-}
-// Add all offsuit broadways (AKo, AQo, ..., JTo)
-function addAllOffsuitBroadways(set){
-  for (let i=0;i<BW.length;i++){
-    for (let j=i+1;j<BW.length;j++){
-      set.add(BW[i] + BW[j] + 'o');
-    }
-  }
-}
-// Add specific offsuit broadway minima, e.g., KTo+, QTo+, JTo (used for SB/BB text)
-function addMostOffsuitBroadways_KTo_QTo_JTo(set){
-  set.add("KTo"); set.add("KJo"); set.add("KQo");
-  set.add("QTo"); set.add("QJo");
-  set.add("JTo");
-}
-// Add offsuit ATo+ (ATo, AJo, AQo, AKo)
-function addAToPlus(set){
-  set.add("ATo"); set.add("AJo"); set.add("AQo"); set.add("AKo");
-}
-// Add offsuit A2o+ up to AKo
-function addA2oPlus(set){
-  for (let i=rIdx("K"); i<=rIdx("2"); i++){ // K..2 (descending indices)
-    const lo = RANKS_ASC[i];
-    set.add("A" + lo + "o");
-    if (lo==="K") break; // stops at AKo
-  }
-}
-// Add offsuit A8o+ (A8o..AKo)
-function addA8oPlus(set){
-  for (let i=rIdx("K"); i<=rIdx("8"); i++){
-    const lo = RANKS_ASC[i];
-    set.add("A" + lo + "o");
-    if (lo==="K") break;
-  }
-}
-// Add suited A2s..A5s
-function addA2s_to_A5s(set){
-  ["5","4","3","2"].forEach(lo => set.add("A"+lo+"s"));
-}
-// Add all suited Axs (A2s..AKs)
-function addAllAxs(set){
-  for (let i=rIdx("K"); i<=rIdx("2"); i++){
-    const lo = RANKS_ASC[i];
-    set.add("A" + lo + "s");
-    if (lo==="K") break; // done at AKs
-  }
-}
-
-// Suited connectors inclusive range, e.g., T9s–54s; or down to 32s
-function addSuitedConnectorsRange(set, start="T9", end="54"){
-  const sHi = start[0], sLo = start[1];
-  const eHi = end[0],   eLo = end[1];
-  // Validate adjacency (connector = next rank down)
-  let iStart = rIdx(sHi), iEnd = rIdx(eHi);
-  for (let i=iStart; i<=rIdx("3"); i++){ // walk down until 32
-    const hi = RANKS_ASC[i], lo = RANKS_ASC[i+1];
-    if (!lo) break;
-    set.add(hi + lo + 's');
-    if (hi===eHi && lo===eLo) break;
-  }
-}
-// Suited gappers inclusive range, e.g., 97s–64s (one-gap)
-function addSuitedGappersRange(set, startHi="9", endHi="6"){
-  let iStart = rIdx(startHi), iEnd = rIdx(endHi);
-  for (let i=iStart; i<=iEnd; i++){
-    const hi = RANKS_ASC[i], mid = RANKS_ASC[i+1], lo = RANKS_ASC[i+2];
-    if (!lo) break;
-    set.add(hi + lo + 's'); // e.g., 9 & 7 => "97s"
-  }
-}
-// Suited connectors down to a low pair like "32s" (T9s..32s)
-function addSuitedConnectorsDownTo(set, end="32"){
-  const eHi = end[0], eLo = end[1];
-  for (let i=rIdx("T"); i<=rIdx("3"); i++){
-    const hi = RANKS_ASC[i], lo = RANKS_ASC[i+1];
-    if (!lo) break;
-    set.add(hi + lo + 's');
-    if (hi===eHi && lo===eLo) break;
-  }
-}
-// Convenience: add explicit offsuit connectors list
-function addOffsuitConnectorsList(set, codes=["T9o","98o","87o"]){
-  codes.forEach(c => set.add(c));
-}
-
-// ---------- Build explicit GREEN/AMBER per seat from your spec ----------
-// We keep the AMBER suggestions we used earlier, then remove any overlap with GREEN.
-const EXPLICIT_OPEN = {
-  UTG: {
-    OPEN_GREEN: (()=>{ // ~14–16%
-      const g = new Set();
-      addPairs(g, "22");                         // 22+
-      // Broadways (offsuit): AJo+, KQo
-      g.add("AJo"); g.add("AQo"); g.add("AKo"); g.add("KQo");
-      // Suited broadways: ATs+, KTs+, QTs+, JTs
-      ["T","J","Q","K"].forEach(lo => g.add("A"+lo+"s")); // ATs..AKs
-      g.add("KTs"); g.add("KJs"); g.add("KQs");
-      g.add("QTs"); g.add("QJs");
-      g.add("JTs");
-      // Suited Aces: A2s–A5s
-      addA2s_to_A5s(g);
-      // Suited connectors: 98s, 87s, 76s
-      ["98s","87s","76s"].forEach(c=>g.add(c));
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["A5s","A4s","KJs","QJs","KQo"]) // earlier amber (dup will be removed below)
-  },
-
-  HJ: {
-    OPEN_GREEN: (()=>{ // ~18–20%
-      const g = new Set();
-      addPairs(g, "22");
-      // Broadways
-      addAToPlus(g);                 // ATo+
-      g.add("KJo"); g.add("KQo");    // KJo+
-      g.add("QJo");                  // QJo
-      ["T","J","Q","K"].forEach(lo => g.add("A"+lo+"s")); // ATs+
-      g.add("KTs"); g.add("KJs"); g.add("KQs");
-      g.add("QTs"); g.add("QJs");
-      g.add("JTs");
-      // Suited Aces: A2s–A5s
-      addA2s_to_A5s(g);
-      // Suited connectors: T9s–65s
-      addSuitedConnectorsRange(g, "T9", "65");
-      // Suited gappers: 97s, 86s
-      ["97s","86s"].forEach(c=>g.add(c));
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["A4s","A3s","A2s","KTs","QTs","JTs","97s","87s","76s","AJo"])
-  },
-
-  CO: {
-    OPEN_GREEN: (()=>{ // ~26–28%
-      const g = new Set();
-      addPairs(g, "22");
-      // Broadways: ATo+, KTo+, QTo+, JTo; all suited broadways
-      addAToPlus(g);
-      g.add("KTo"); g.add("KJo"); g.add("KQo");
-      g.add("QTo"); g.add("QJo");
-      g.add("JTo");
-      addAllSuitedBroadways(g);
-      // Suited Aces: A2s–A5s
-      addA2s_to_A5s(g);
-      // Suited connectors: T9s–54s
-      addSuitedConnectorsRange(g, "T9", "54");
-      // Suited gappers: 97s–64s
-      addSuitedGappersRange(g, "9", "6");
-      // Offsuit Aces: A8o+
-      addA8oPlus(g);
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["AJo","ATo","KTo","QTo","J9s","T8s","97s","54s"])
-  },
-
-  BTN: {
-    OPEN_GREEN: (()=>{ // ~45–50%
-      const g = new Set();
-      addPairs(g, "22");
-      // Broadways: ALL offsuit & suited
-      addAllOffsuitBroadways(g);
-      addAllSuitedBroadways(g);
-      // Offsuit Aces: A2o+
-      addA2oPlus(g);
-      // Suited Aces: ALL Axs
-      addAllAxs(g);
-      // Suited connectors: T9s–32s
-      addSuitedConnectorsDownTo(g, "32");
-      // Suited gappers: 97s–42s
-      addSuitedGappersRange(g, "9", "4");
-      // Offsuit connectors: T9o, 98o, 87o
-      addOffsuitConnectorsList(g, ["T9o","98o","87o"]);
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["K8s","Q8s","J7s","T7s","A9o","K9o","Q9o"])
-  },
-
-  SB: {
-    OPEN_GREEN: (()=>{ // ~35–40% (raise-or-fold; modern)
-      const g = new Set();
-      addPairs(g, "22");
-      // Aces
-      addA2oPlus(g);     // A2o+
-      addAllAxs(g);      // all Axs
-      // Suited broadways: ALL
-      addAllSuitedBroadways(g);
-      // Most offsuit broadways: KTo+, QTo+, JTo
-      addMostOffsuitBroadways_KTo_QTo_JTo(g);
-      // Suited connectors: T9s–54s
-      addSuitedConnectorsRange(g, "T9", "54");
-      // Suited gappers: 97s–64s
-      addSuitedGappersRange(g, "9", "6");
-      // Offsuit connectors: T9o, 98o
-      addOffsuitConnectorsList(g, ["T9o","98o"]);
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["AJo","KJo","QJo","J9s","T8s","76s"]) // kept from earlier
-  },
-
-  BB: {
-    // If everyone folds to BB & you raise (rare), use a wide but slightly tighter than SB set.
-    OPEN_GREEN: (()=>{ 
-      const g = new Set();
-      addPairs(g, "22");
-      addAllSuitedBroadways(g);
-      addMostOffsuitBroadways_KTo_QTo_JTo(g); // "most offsuit broadways"
-      addA2oPlus(g);      // A2o+
-      addAllAxs(g);       // all Axs
-      addSuitedConnectorsRange(g, "T9", "54");
-      addSuitedGappersRange(g, "9", "6");
-      return g;
-    })(),
-    OPEN_AMBER: new Set(["A9s","A8s","KJs","QTs","J9s","98s"])
-  }
-};
-
-// Ensure AMBER doesn’t duplicate GREEN (for cleaner coloring)
-(function deDupeAmber(){
-  Object.values(EXPLICIT_OPEN).forEach(seat=>{
-    if (!seat || !seat.OPEN_GREEN || !seat.OPEN_AMBER) return;
-    for (const code of seat.OPEN_GREEN) {
-      if (seat.OPEN_AMBER.has(code)) seat.OPEN_AMBER.delete(code);
-    }
-  });
-})();
-
-// ===== 3-bet & Defend masks (hybrid) =====
-const HYBRID_3BET_RANGES = {
-  BTN: {
-    CO: { open:["QQ+","AKo","AQs+","KQs","AJo"], mix:["TT-JJ","ATs"] },
-    HJ: { open:["QQ+","AKo","AQs+","KQs"], mix:["JJ","ATs","KJs"] },
-    UTG:{ open:["QQ+","AKo","AQs+"], mix:["JJ","KQs"] },
-    SB:  { open:["JJ+","AKo","AQs+"], mix:["AJo","KQs"] }
-  },
-  SB: {
-    BTN: { open:["JJ+","AKo","AQs+","KQs","AJo"], mix:["TT","ATs","KJs"] },
-    CO:  { open:["QQ+","AKo","AQs+","KQs"], mix:["JJ","ATs"] },
-    HJ:  { open:["QQ+","AKo","AQs+"], mix:["JJ","KQs"] },
-    UTG: { open:["QQ+","AKo","AQs+"], mix:["JJ"] }
-  },
-  CO: {
-    HJ:  { open:["QQ+","AKo","AQs+","KQs"], mix:["JJ","ATs"] },
-    UTG: { open:["QQ+","AKo","AQs+"], mix:["JJ"] }
-  },
-  HJ: {
-    UTG: { open:["QQ+","AKo","AQs+"], mix:["JJ"] }
-  },
-  BB: {
-    BTN: { open:["JJ+","AKo","AQs+","KQs"], mix:["TT","ATs","KJs"] },
-    CO:  { open:["QQ+","AKo","AQs+"], mix:["JJ","KQs"] },
-    HJ:  { open:["QQ+","AKo","AQs+"], mix:["JJ"] },
-    UTG: { open:["QQ+","AKo","AQs+"], mix:["JJ"] },
-    SB:  { open:["JJ+","AKo","AQs+"], mix:["TT","KQs"] }
-  }
-};
-const HYBRID_DEFEND_RANGES = {
-  BTN: { open:["22+","A2s+","K7s+","Q8s+","J8s+","T8s+","98s-54s","A2o+","KTo+","QTo+","JTo"], mix:["K9o","Q9o"] },
-  CO:  { open:["22+","A2s+","K8s+","Q9s+","J9s+","T9s-65s","A8o+","KJo+","QJo"], mix:["KTo","QTo"] },
-  HJ:  { open:["22+","A2s+","K9s+","QTs+","JTs-76s","A9o+","KQo"], mix:["KJo","QJo"] },
-  UTG: { open:["22+","A3s+","KTs+","QJs","JTs-87s","AJo+","KQo"], mix:["ATo","KJo"] },
-  SB:  { open:["—"], mix:["—"] } // SB defend special; often 3-bet/fold vs late opens
-};
-
-// Normalize a token -> explicit hand codes (keep your expandToken implementation)
-// Normalize a token (e.g., "ATs-A5s", "A2o+", "TT+") into explicit hand codes.
-// Works with:
-//  - Pairs:  "TT+", "99"
-//  - Suited: "AQs+", "ATs-A5s", "T9s-54s", "KQs"
-//  - Offsuit:"A2o+", "KQo"
-// Notes:
-//  - RANKS_ASC = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"] (high -> low)
-//  - RANK_INDEX maps rank -> index in that array (smaller index = stronger rank).
-function expandToken(token){
-  token = token.replace(/[–—]/g, '-').trim();
-
-  // ---------- 1) PAIRS with "+" e.g., "TT+" ----------
-  if (/^([2-9TJQKA])\1\+$/.test(token)) {
-    const hi = token[0];                 // e.g., 'T'
-    const startIdx = RANKS_ASC.indexOf(hi);
-    // From AA down to TT: indices 0..startIdx inclusive
-    return RANKS_ASC.slice(0, startIdx + 1).map(r => r + r);
-  }
-
-  // ---------- 2) Single PAIR e.g., "99" ----------
-  if (/^([2-9TJQKA])\1$/.test(token)) {
-    return [token];
-  }
-
-  // ---------- 3) SUITED / OFFSUIT with "+" e.g., "A2o+", "K9s+" ----------
-  // Meaning: fix the first rank (hi) and sweep the second rank from 'lo' up to just below 'hi'.
-  if (/^[2-9TJQKA]{2}[so]\+$/.test(token)) {
-    const hi  = token[0];
-    const lo0 = token[1];
-    const sfx = token[2]; // 's' or 'o'
-    const hiIdx = RANK_INDEX[hi];      // e.g., 'A' -> 0
-    const loIdx0 = RANK_INDEX[lo0];    // e.g., '2' -> 12
-    const stopAt = hiIdx + 1;          // sweep down to just under 'hi' (e.g., A -> stop at K (idx 1))
-    const out = [];
-    // Walk indices DOWN: lo0, then stronger kickers approaching 'hi', but NOT past stopAt
-    for (let i = loIdx0; i >= stopAt; i--) {
-      const kicker = RANKS_ASC[i];
-      out.push(hi + kicker + sfx);
-    }
-    return out;
-  }
-
-  // ---------- 4) RANGED SUITED AX/Broadway e.g., "ATs-A5s" ----------
-  if (/^[2-9TJQKA]{2}s-[2-9TJQKA]{2}s$/.test(token)) {
-    const hi      = token[0];          // 'A' in "ATs-A5s"
-    const loStart = token[1];          // 'T'
-    const loEnd   = token[4];          // '5'
-    const startIdx = RANKS_ASC.indexOf(loStart);
-    const endIdx   = RANKS_ASC.indexOf(loEnd);
-    const out = [];
-    for (let i = startIdx; i <= endIdx; i++) {
-      const lo = RANKS_ASC[i];
-      if (RANK_INDEX[hi] < RANK_INDEX[lo]) out.push(hi + lo + 's');
-    }
-    return out;
-  }
-
-  // ---------- 5) RANGED SUITED CONNECTORS e.g., "T9s-54s" ----------
-  if (/^[2-9TJQKA][2-9TJQKA]s-[2-9TJQKA][2-9TJQKA]s$/.test(token)) {
-    const a = token.slice(0, 3);   // e.g., T9s
-    const b = token.slice(4, 7);   // e.g., 54s
-    const seq = ["A","K","Q","J","T","9","8","7","6","5","4","3","2"]; // high -> low
-
-    // Find start like "T9s" in the descending chain; then move down until we hit "54s"
-    let out = [];
-    let startFound = false;
-    for (let i = 0; i < seq.length - 1; i++) {
-      const hi = seq[i], lo = seq[i+1];
-      const code = hi + lo + 's';
-      if (!startFound) {
-        if (code === a) { startFound = true; out.push(code); }
-      } else {
-        out.push(code);
-        if (code === b) break;
-      }
-    }
-    return out;
-  }
-
-  // ---------- 6) Single suited/offsuit like "KQs", "QJo" ----------
-  if (/^[2-9TJQKA]{2}[so]$/.test(token)) {
-    const hi = token[0], lo = token[1];
-    if (RANK_INDEX[hi] < RANK_INDEX[lo]) return [token]; // ensure hi > lo by rank strength
-    return [];
-  }
-
-  // ---------- 7) Edge fallback: raw two-rank "AK" (rare) ----------
-  if (/^[2-9TJQKA]{2}$/.test(token)) return [token];
-
-  return [];
-}
-
-function buildClassMapForPos(pos){
-  const def = HYBRID_RANGES[pos] || {open:[], mix:[]};
-  const openSet = new Set(def.open.flatMap(expandToken));
-  const mixSet = new Set(def.mix.flatMap(expandToken));
-  return buildClassMapFromSets(openSet, mixSet);
-}
-function buildClassMapFromSets(openSet, mixSet){
-  const map = new Map();
-  for (let i=0;i<RANKS_ASC.length;i++){
-    for (let j=0;j<RANKS_ASC.length;j++){
-      const r1=RANKS_ASC[i], r2=RANKS_ASC[j];
-      if (i===j){
-        const code=r1+r2;
-        map.set(code, openSet.has(code)?'open':(mixSet.has(code)?'mix':'fold'));
-      } else if (i<j){
-        const sCode=r1+r2+'s', oCode=r1+r2+'o';
-        map.set(sCode, openSet.has(sCode)?'open':(mixSet.has(sCode)?'mix':'fold'));
-        map.set(oCode, openSet.has(oCode)?'open':(mixSet.has(oCode)?'mix':'fold'));
-      }
-    }
-  }
-  return map;
-}
-
-// ===== Fallbacks when RANGES_JSON is missing (Explicit / Hybrid) =====
-function explicitOpenClassFor(seat, code){
-  try{
-    const exp = (typeof EXPLICIT_OPEN !== 'undefined') ? EXPLICIT_OPEN[seat] : undefined;
-    if (!exp) return 'fold';
-    if (exp.OPEN_GREEN?.has(code)) return 'open';
-    if (exp.OPEN_AMBER?.has(code)) return 'mix';
-  }catch(e){}
-  return 'fold';
-}
-function hybridOpenClassFor(seat, code){
-  try{
-    const map = buildClassMapForPos(seat);  // already defined in your file
-    return map.get(code) || 'fold';
-  }catch(e){}
-  return 'fold';
-}
-function listToClassMap(lists){
-  // lists: {open:[tokens], mix:[tokens]}
-  if (!lists) return null;
-  const openSet = new Set((lists.open ?? []).flatMap(expandToken));
-  const mixSet  = new Set((lists.mix  ?? []).flatMap(expandToken));
-  return { openSet, mixSet };
-}
-function classFromLists(listMap, code){
-  if (!listMap) return 'fold';
-  if (listMap.openSet.has(code)) return 'open';
-  if (listMap.mixSet.has(code))  return 'mix';
-  return 'fold';
+    // No fallback: pure JSON engine.
+    return null;
 }
 
 // ==================== Preflop Engine v1 (deterministic) ====================
 // Uses RANGES_JSON + built-ins to simulate villain actions up to hero's turn.
 // Priority: 3-bet > call > fold. Sizing: simple, deterministic (see below).
+
+// ===== Preflop v2 helpers (JSON-frequency aware) =====
+
+// Safe read of frequency from a bucket (0..1), else null
+//// REPLACE your jsonFreq() with this upgraded version
+
+//// Add this near the top of preflop code:
+
+function determineOpenerFromHistory(actions) {
+    for (const a of actions) {
+        if (a.stage === 'preflop' && a.decision === 'raise') {
+            return a.seat;
+        }
+    }
+    return null;
+}
+
+function freqToAction(freq) {
+    if (freq == null) return 'fold';
+    if (freq === 0) return 'fold';
+    if (freq === 1) return 'pure';
+    return 'mix';
+}
+
+function jsonFreq(bucket, code) {
+    try {
+        if (!bucket) return null;
+        const v = bucket[code];
+        if (v === undefined || v === null) return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? Math.max(0, Math.min(n, 1)) : null;
+    } catch {
+        return null;
+    }
+}
+
+// === JSON frequency helpers (clean, non-recursive, no fallbacks) ===
+
+// OPEN frequencies (RFI)
+function getJsonOpenFreq(s, code) {
+    try {
+        const bucket = RANGES_JSON?.open?.[seat];
+        return jsonFreq(bucket, code);
+    } catch {
+        return null;
+    }
+}
+
+// 3-BET frequencies vs opener
+function getJsonThreeBetFreq(s, openerSeat, code) {
+    try {
+        const key = vsKey(seat, openerSeat);  // e.g. "CO_vs_UTG"
+        const bucket = RANGES_JSON?.three_bet?.[key];
+        return jsonFreq(bucket, code);
+    } catch {
+        return null;
+    }
+}
+
+// CALL frequencies vs opener
+function getJsonCallFreq(seat, openerSeat, code) {
+    try {
+        // BB uses defend bucket instead of vs_open
+        if (seat === "BB") {
+            const bbKey = `BB_vs_${openerSeat}`;
+            const bucket = RANGES_JSON?.defend?.[bbKey];
+            return jsonFreq(bucket, code);
+        }
+        const key = vsKey(seat, openerSeat);
+        const bucket = RANGES_JSON?.vs_open?.[key]?.call;
+        return jsonFreq(bucket, code);
+    } catch {
+        return null;
+    }
+}
+
+// BB DEFEND (calls only)
+function getJsonDefendFreqBB(openerSeat, code) {
+    try {
+        const key = `BB_vs_${openerSeat}`;
+        const bucket = RANGES_JSON?.defend?.[key];
+        return jsonFreq(bucket, code);
+    } catch {
+        return null;
+    }
+}
+
+
+// STRICT SB/BB DEFENDING LOGIC
+function jsonCallDecision(seat, openerSeat, code) {
+    // BB uses BB defend JSON
+    if (seat === 'BB') {
+        return getJsonDefendFreqBB(openerSeat, code);
+    }
+
+    // All other seats use vs_open call JSON
+    return getJsonCallFreq(seat, openerSeat, code);
+}
+
+// Decide a mixed action with Math.random() once per check
+function takeWithFreq(freq) {
+  if (freq == null) return false;
+  return Math.random() <= freq;
+}
+
+// Global Function - Build keys like "HJ_vs_UTG"
+function vsKey(seat, opener) {
+  return `${seat}_vs_${opener}`;
+}
+
+// Compute a raise-to (in chips) from ×BB
+function bbToChips(bbMult) {
+  const bb = toStep5(BLINDS.bb);
+  return toStep5(bbMult * bb);
+}
+
+// Record/extend preflop participants safely (unique)
+function addPreflopParticipant(seat) {
+  const parts = new Set(ENGINE.preflop?.participants || []);
+  parts.add(seat);
+  ENGINE.preflop.participants = [...parts];
+}
+
+// Append a small string to scenario label
+function appendScenarioNote(note) {
+  try {
+    if (!note) return;
+    if (!scenario) scenario = { label: note, potFactor: 0 };
+    else scenario.label = scenario.label ? `${scenario.label} · ${note}` : note;
+  } catch (e) {}
+}
+
+// Conservative 4-bet top (Option A)
+const STRONG_4B = new Set(['AA', 'KK', 'QQ', 'AKs', 'AKo']);
+
+// Compute a 4-bet raise-to (× of 3-bet size)
+function fourBetSizeBb(openerSeat, threeBetterSeat, threeBetToBb) {
+  // Simple heuristic: 2.2x–2.5x 3-bet size depending on position
+  const ipSeats = new Set(['BTN', 'CO']); // rough IP heuristic
+  const openerIP = ipSeats.has(openerSeat) && !ipSeats.has(threeBetterSeat);
+  const mult = openerIP ? 2.2 : 2.5;
+  return Math.max(3.8 * (ENGINE.preflop?.openToBb || 2.2), mult * threeBetToBb);
+}
+
+// Training mode: behind-hero JSON 3-bet hands are flatted (no second hero decision)
+const TRAINING_FLAT_3BET_AFTER_HERO = true;
 
 // -- Table snapshot for this hand
 let TABLE = { seats: [] }; // [{ seat:'UTG', role:'hero'|'villain', hand:[c1,c2] }]
@@ -2735,51 +1695,27 @@ function inBucket(bucketObj, code){
   const cls = freqToClass(bucketObj[code]);
   return (cls==='open' || cls==='mix');
 }
+
 function canOpen(seat, code){
-  // 1) JSON if available
-  const jsonBucket = RANGES_JSON?.open?.[seat];
-  if (jsonBucket && inBucket(jsonBucket, code)) return true;
-  // 2) Explicit fallback
-  const expCls = explicitOpenClassFor(seat, code);
-  if (expCls === 'open' || expCls === 'mix') return true;
-  // 3) Hybrid fallback
-  const hybCls = hybridOpenClassFor(seat, code);
-  return (hybCls === 'open' || hybCls === 'mix');
+    const freq = getJsonOpenFreq(s, code);
+    return freq !== null && freq > 0;
 }
-function inThreeBetBucket(seat, opener, code){
-  // 1) JSON if available
-  const key = `${seat}_vs_${opener}`;
-  const json = RANGES_JSON?.three_bet?.[key];
-  if (json && inBucket(json, code)) return true;
-  // 2) Hybrid fallback (token lists)
-  const lists = HYBRID_3BET_RANGES?.[seat]?.[opener] ?? null;
-  const lm = listToClassMap(lists);
-  const cls = classFromLists(lm, code);
-  return (cls==='open' || cls==='mix');
+
+function inThreeBetBucket(s, openerSeat, code){
+    const freq = getJsonThreeBetFreq(s, openerSeat, code);
+    return freq !== null && freq > 0;
 }
-function inCallBucket(seat, opener, code){
-  if (seat === 'BB'){
-    // 1) JSON BB defend
-    const key = `BB_vs_${opener}`;
-    const json = RANGES_JSON?.defend?.[key];
-    if (json && inBucket(json, code)) return true;
-    // 2) Hybrid defend fallback (by opener)
-    const lists = HYBRID_DEFEND_RANGES?.[opener] ?? null;
-    const lm = listToClassMap(lists);
-    const cls = classFromLists(lm, code);
-    return (cls==='open' || cls==='mix');
-  } else {
-    // 1) JSON non-BB call
-    const key = `${seat}_vs_${opener}`;
-    const call = RANGES_JSON?.vs_open?.[key]?.call;
-    if (call && inBucket(call, code)) return true;
-    // 2) Hybrid defend fallback (by opener)
-    const lists = HYBRID_DEFEND_RANGES?.[opener] ?? null;
-    const lm = listToClassMap(lists);
-    const cls = classFromLists(lm, code);
-    return (cls==='open' || cls==='mix');
-  }
+
+function inCallBucket(seat, openerSeat, code){
+    if (seat === 'BB') {
+        const freq = getJsonDefendFreqBB(openerSeat, code);
+        return freq !== null && freq > 0;
+    } else {
+        const freq = getJsonCallFreq(seat, openerSeat, code);
+        return freq !== null && freq > 0;
+    }
 }
+
 
 // Open sizes (raise-to) by seat: midpoint of your guidance
 function standardOpenSizeBb(seat){
@@ -2838,6 +1774,234 @@ function contributeCallTo(pot, targetTo, seat){
   return toStep5(pot + callAmt);
 }
 
+// --- Preflop v2: simulate villains BEFORE hero (JSON-driven) ---
+function runPreflopUpToHero() {
+  const heroSeat = currentPosition();
+  const sb = toStep5(BLINDS.sb), bb = toStep5(BLINDS.bb);
+
+  let potLocal = toStep5(sb + bb); // blinds posted
+  let toCallLocal = 0;
+
+  let openerSeat = null;
+  let openToBb = null;
+
+  let threeBetterSeat = null;
+  let threeBetToBb = null;
+
+  const coldCallers = [];
+
+  // Walk seats until hero
+  for (const s of ACTION_ORDER) {
+    if (s === heroSeat) break;
+
+    const seatObj = TABLE.seats.find(x => x.seat === s);
+    if (!seatObj || !seatObj.hand) continue; // safety
+    const code = handToCode(seatObj.hand);
+
+    // 1) No opener yet -> try JSON open for 's'
+    if (!openerSeat) {
+      const freqOpen = getJsonThreeBetFreq(s, openerSeat, code);
+      if (takeWithFreq(freqOpen)) {
+        openerSeat = s;
+        openToBb = standardOpenSizeBb(s);
+        potLocal = contributeRaiseTo(potLocal, bbToChips(openToBb), s);
+        // Scenario label will be finalized later; keep concise here
+        continue;
+      }
+      // else folds silently
+      continue;
+    }
+
+    // 2) We have an opener -> try JSON 3-bet (priority) vs opener
+    if (!threeBetterSeat) {
+      const key3 = vsKey(s, openerSeat);
+      const freq3 = getJsonThreeBetFreq(s, openerSeat, code);
+      if (takeWithFreq(freq3)) {
+        threeBetterSeat = s;
+        threeBetToBb = threeBetSizeBb(openerSeat, s, openToBb);
+        potLocal = contributeRaiseTo(potLocal, bbToChips(threeBetToBb), s);
+
+        // Optional: opener may 4-bet (Option A) IF opener comes before hero and holds top range.
+        // Since we don't look at opener's actual hand here, we keep Option A as a pure structural allowance:
+        // Do NOT execute 4-bet here to avoid presenting hero with a second decision preflop in this project.
+
+        break; // stop before hero; hero will face the 3-bet
+      }
+      // 3) Else try JSON cold call vs opener
+      let freqCall = jsonCallDecision(s, openerSeat, code);
+      
+      if (takeWithFreq(freqCall)) {
+        potLocal = contributeCallTo(potLocal, bbToChips(openToBb), s);
+        coldCallers.push(s);
+        continue;
+      }
+      // else fold
+      continue;
+    }
+
+    // If a 3-bet already exists before hero, we stop the pass (keeps your original flow)
+    break;
+  }
+
+  // Compute hero's "toCall" at their turn
+  const heroBlind = (heroSeat === 'SB') ? sb : (heroSeat === 'BB' ? bb : 0);
+
+  if (!openerSeat) {
+    // Unopened pot to hero
+    if (heroSeat === 'BB') toCallLocal = 0;
+    else if (heroSeat === 'SB') toCallLocal = Math.max(0, bb - sb);
+    else toCallLocal = bb;
+  } else if (threeBetterSeat) {
+    const rTo = bbToChips(threeBetToBb);
+    toCallLocal = Math.max(0, rTo - heroBlind);
+  } else {
+    const rTo = bbToChips(openToBb);
+    toCallLocal = Math.max(0, rTo - heroBlind);
+  }
+
+  // Build label
+  let label = 'Preflop';
+  if (openerSeat && !threeBetterSeat) {
+    label = `${openerSeat} opened ${openToBb.toFixed(1)}x`;
+    if (coldCallers.length > 0) label += ' · cold call';
+  } else if (openerSeat && threeBetterSeat) {
+    label = `${openerSeat} opened ${openToBb.toFixed(1)}x · ${threeBetterSeat} 3‑bet ${threeBetToBb.toFixed(1)}x`;
+  }
+
+  return {
+    potLocal,
+    toCallLocal,
+    openerSeat,
+    openToBb,
+    threeBetterSeat,
+    threeBetToBb,
+    coldCallers,
+    label
+  };
+}
+
+// --- Preflop v2: simulate villains AFTER hero (JSON-driven callers only) ---
+function runPreflopAfterHero(heroDecision) {
+  // Only relevant in preflop
+  if (STAGES[currentStageIndex] !== 'preflop') return;
+
+  const heroSeat = currentPosition();
+  const bb = toStep5(BLINDS.bb);
+
+  // Ensure ENGINE.preflop context is present
+  let openerSeat = ENGINE.preflop?.openerSeat ?? null;
+  let threeBetterSeat = ENGINE.preflop?.threeBetterSeat ?? null;
+  let openToBb = ENGINE.preflop?.openToBb ?? null;
+  let threeBetToBb = ENGINE.preflop?.threeBetToBb ?? null;
+
+  // If hero opened first-in, standardize openToBb from chosen size (or default)
+  if (!openerSeat && heroDecision === 'raise') {
+    openerSeat = heroSeat;
+    ENGINE.preflop.openerSeat = heroSeat;
+
+    if (heroActions?.preflop?.sizeBb != null) {
+      openToBb = Number(heroActions.preflop.sizeBb);
+    } else {
+      openToBb = standardOpenSizeBb(heroSeat);
+    }
+    ENGINE.preflop.openToBb = openToBb;
+    appendScenarioNote(`${heroSeat} opened ${openToBb.toFixed(1)}x`);
+  }
+
+  // If hero 3-bet vs an opener, size mapping (used only for display, not to continue action)
+  if (openerSeat && heroSeat === ENGINE.preflop?.threeBetterSeat) {
+    // threeBetToBb may be coming from heroActions (× of open) or direct ×BB
+    if (heroActions?.preflop?.sizeMult != null) {
+      threeBetToBb = Number(heroActions.preflop.sizeMult) * (ENGINE.preflop?.openToBb ?? standardOpenSizeBb(openerSeat));
+    } else if (heroActions?.preflop?.sizeBb != null) {
+      threeBetToBb = Number(heroActions.preflop.sizeBb);
+    } else {
+      threeBetToBb = threeBetSizeBb(openerSeat, heroSeat, ENGINE.preflop?.openToBb ?? 2.2);
+    }
+    ENGINE.preflop.threeBetToBb = threeBetToBb;
+  }
+
+  // We DO NOT allow raises after hero to keep one hero decision per street.
+  // Allow ONLY JSON callers behind hero to continue to the flop.
+
+  // Build order strictly AFTER hero, wrapping around until just before hero
+const order = ACTION_ORDER.slice();
+const startIdx = order.indexOf(heroSeat);
+if (startIdx < 0) return;             // <-- add this guard, too
+const seq = [];
+for (let k = (startIdx + 1) % order.length; k !== startIdx; k = (k + 1) % order.length) {
+  seq.push(order[k]);
+}
+
+  const newCallers = [];
+
+for (const s of seq) {
+  // Skip seats that acted before hero
+  const alreadyIn =
+    (ENGINE.preflop?.openerSeat === s) ||
+    (ENGINE.preflop?.threeBetterSeat === s) ||
+    (ENGINE.preflop?.coldCallers || []).includes(s);
+  if (alreadyIn) continue;
+
+  // Must have an opener; if a pre-hero 3-bet exists, stop (we don't re-open after hero)
+  if (!openerSeat) break;
+  if (threeBetterSeat) break;
+
+  const seatObj = TABLE.seats.find(x => x.seat === s);
+  if (!seatObj || !seatObj.hand) continue;
+  const code = handToCode(seatObj.hand);
+
+  // 1) NEW: Check JSON 3-bet behind hero (training simplification: flat the 3-bet)
+  let tookAction = false;
+  const key3 = vsKey(s, openerSeat);
+  const freq3 = getJsonThreeBetFreq(s, openerSeat, code); // e.g., SB_vs_BTN.AKo = 1.0
+  if (TRAINING_FLAT_3BET_AFTER_HERO && takeWithFreq(freq3)) {
+    // Flat instead of raising (keeps single hero decision), but annotate that it would've 3-bet
+    pot = contributeCallTo(pot, bbToChips(openToBb), s);
+    addPreflopParticipant(s);
+    newCallers.push(s);
+    appendScenarioNote(`${s} would 3‑bet (training flat)`);
+    tookAction = true;
+  }
+
+  if (tookAction) continue;
+
+  // 2) Else, try JSON flat as before
+  let freqCall = jsonCallDecision(s, openerSeat, code);
+
+  if (takeWithFreq(freqCall)) {
+    pot = contributeCallTo(pot, bbToChips(openToBb), s);
+    addPreflopParticipant(s);
+    newCallers.push(s);
+  } else {
+    // Fold (for disc visuals)
+    ENGINE.statusBySeat[s] = (ENGINE.statusBySeat[s] === 'in') ? 'folded_now' : (ENGINE.statusBySeat[s] || 'folded_now');
+  }
+}
+
+  // Rebuild participants list: opener + any pre-hero cold callers + any new callers + hero if not folded
+  const parts = new Set(ENGINE.preflop?.participants || []);
+  if (openerSeat) parts.add(openerSeat);
+  (ENGINE.preflop?.coldCallers || []).forEach(seat => parts.add(seat));
+  newCallers.forEach(seat => parts.add(seat));
+
+  // Include hero if hero did not fold
+  const heroDidNotFold = !handHistory.some(h => h.stage === 'preflop' && h.decision === 'fold');
+  if (heroDidNotFold) parts.add(heroSeat);
+
+  ENGINE.preflop.participants = [...parts];
+
+  // Nice label updates
+  if (newCallers.length === 1) appendScenarioNote(`${newCallers[0]} calls`);
+  if (newCallers.length > 1) appendScenarioNote(`${newCallers.length} callers`);
+
+  // After hero acts, there is no price to call for the hero
+  toCall = 0;
+
+  // UI refresh
+  renderPositionStatusRow();
+  updatePotInfo();
+}
 
 function currentPosition(){ return POSITIONS6[heroPosIdx % POSITIONS6.length]; }
 function heroHandCode(){
@@ -2859,67 +2023,47 @@ function classifyHeroHandAtPosition(){
 
 // Context-aware preflop suggestion for the badge & modal.
 // Returns: { kind: 'Open'|'3-Bet'|'Call'|'Fold', band: 'green'|'amber'|'red', src: 'JSON'|'HYBRID'|'EXPLICIT'|'FALLBACK', detail?: string }
-
-// Context-aware preflop suggestion for the badge & modal.
-// Returns: { kind: 'Open'|'3-Bet'|'4-Bet'|'Call'|'Fold', band: 'green'|'amber'|'red', src: 'JSON'|'HYBRID'|'EXPLICIT'|'FALLBACK'|'SB-3bet-or-fold' }
 function classifyHeroPreflopBadge(){
   const seat = currentPosition();
   const code = heroHandCode();
-  const opener = ENGINE.preflop?.openerSeat ?? null;
-  const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
-
-  // 1) Unopened pot → use Open ranges for hero seat
+  const opener = ENGINE.preflop?.openerSeat ?? null; // set in startNewHand() via engineSetPreflopContext(...)
+ const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
+ 
+ // --- 1) Unopened pot -> use Open ranges for hero seat ---
   if (!opener) {
+    // Prefer JSON open
     try {
       const bucket = RANGES_JSON?.open?.[seat];
       if (bucket && bucket[code] != null) {
         const cls = freqToClass(bucket[code]); // 'open' | 'mix' | 'fold'
-        if (cls === 'open') return { kind:'Open', band:'green', src:'JSON' };
-        if (cls === 'mix')  return { kind:'Open', band:'amber', src:'JSON' };
+        if (cls === 'open')  return { kind:'Open', band:'green', src:'JSON' };
+        if (cls === 'mix')   return { kind:'Open', band:'amber', src:'JSON' };
         return { kind:'Fold', band:'red', src:'JSON' };
       }
     } catch(e){/* fallback below */}
-    try {
-      const clsMap = getClassMapForSeat(seat); // prefers explicit, then hybrid
-      const cls = (clsMap.get(code) ?? 'fold');
-      if (cls === 'open') return { kind:'Open', band:'green', src:'EXPLICIT' };
-      if (cls === 'mix')  return { kind:'Open', band:'amber', src:'EXPLICIT' };
-    } catch(e){}
-    return { kind:'Fold', band:'red', src:'FALLBACK' };
-  }
+   
+// No JSON → automatically fold
+return { kind:'Fold', band:'red', src:'JSON-missing' };
 
-  // 2) Facing a 3-bet before hero acts → use vs_3bet JSON if present; else conservative fallback
-  if (opener && threeBetter) {
-    try {
-      const key1 = `${seat}_vs_${threeBetter}_over_${opener}`;
-      const key2 = `${seat}_vs_${threeBetter}`;
-      const rb = RANGES_JSON?.vs_3bet?.[key1] ?? RANGES_JSON?.vs_3bet?.[key2];
-      if (rb) {
-        const fb = rb.four_bet ? freqToClass(rb.four_bet[code]) : null;
-        const cb = rb.call     ? freqToClass(rb.call[code])     : null;
-        if (fb === 'open') return { kind:'4-Bet', band:'green', src:'JSON' };
-        if (fb === 'mix')  return { kind:'4-Bet', band:'amber', src:'JSON' };
-        if (cb === 'open') return { kind:'Call', band:'green', src:'JSON' };
-        if (cb === 'mix')  return { kind:'Call', band:'amber', src:'JSON' };
-      }
-    } catch(e){/* ignore */}
-    const strong4b = new Set(['AA','KK','QQ','AKs','AKo']);
-    if (strong4b.has(code)) return { kind:'4-Bet', band:'green', src:'FALLBACK' };
-    return { kind:'Fold', band:'red', src:'FALLBACK' };
-  }
+  // Conservative fallback (safe default): only top value hands 4-bet; everything else folds.
+  const strong4b = new Set(['AA','KK','QQ','AKs','AKo']);
+  if (strong4b.has(code)) return { kind:'4-Bet', band:'green', src:'FALLBACK' };
+  return { kind:'Fold', band:'red', src:'FALLBACK' };
+}
 
-  // 3) Facing an open → prefer 3-bet; else Call; else Fold
-  // 3a) JSON 3-bet
+  // --- 2) Facing an open -> prefer 3-bet if available, else Call, else Fold ---
+  // 2a) JSON 3-bet
   try {
-    const key = `${seat}_vs_${opener}`;
+
     const tb = RANGES_JSON?.three_bet?.[key];
     if (tb && tb[code] != null) {
       const cls = freqToClass(tb[code]);
       if (cls === 'open') return { kind:'3-Bet', band:'green', src:'JSON' };
       if (cls === 'mix')  return { kind:'3-Bet', band:'amber', src:'JSON' };
     }
-  } catch(e){/* continue */}
-  // 3b) JSON Call (BB from defend.*, others from vs_open.<seat>_vs_<opener>.call)
+  } catch(e){/* fallback next */}
+
+  // 2b) JSON Call (BB uses defend.BB_vs_<opener>; others use vs_open.<seat>_vs_<opener>.call)
   try {
     if (seat === 'BB') {
       const key = `BB_vs_${opener}`;
@@ -2930,37 +2074,31 @@ function classifyHeroPreflopBadge(){
         if (cls === 'mix')  return { kind:'Call', band:'amber', src:'JSON' };
       }
     } else {
-      const key = `${seat}_vs_${opener}`;
+   
       const callObj = RANGES_JSON?.vs_open?.[key]?.call;
       if (callObj && callObj[code] != null) {
         const cls = freqToClass(callObj[code]);
         if (cls === 'open') return { kind:'Call', band:'green', src:'JSON' };
         if (cls === 'mix')  return { kind:'Call', band:'amber', src:'JSON' };
       }
-      // SB: no JSON flat found → treat as 3-bet/fold training rule
-      if (seat === 'SB') {
-        return { kind:'Fold', band:'red', src:'SB-3bet-or-fold' };
-      }
     }
-  } catch(e){/* continue */}
+  } catch(e){/* fallback next */}
 
-  // 3c) HYBRID fallbacks (token lists you ship)
+  // 2c) HYBRID fallbacks (token lists you already ship)
   try {
-    // 3-bet hybrid (seat & opener aware)
+    // 3-bet hybrid
     const lists3 = HYBRID_3BET_RANGES?.[seat]?.[opener] ?? null;
     const lm3 = listToClassMap(lists3);
     const cls3 = classFromLists(lm3, code); // 'open'|'mix'|'fold'
     if (cls3 === 'open') return { kind:'3-Bet', band:'green', src:'HYBRID' };
     if (cls3 === 'mix')  return { kind:'3-Bet', band:'amber', src:'HYBRID' };
 
-    // Call hybrid — seat-agnostic; DO NOT apply to SB
-    const listsCall = HYBRID_DEFEND_RANGES?.[opener] ?? null;
+    // Call hybrid
+    const listsCall = HYBRID_DEFEND_RANGES?.[opener] ?? null; // defend maps keyed by opener seat
     const lmC = listToClassMap(listsCall);
     const clsC = classFromLists(lmC, code);
-    if (seat !== 'SB') {
-      if (clsC === 'open') return { kind:'Call', band:'green', src:'HYBRID' };
-      if (clsC === 'mix')  return { kind:'Call', band:'amber', src:'HYBRID' };
-    }
+    if (clsC === 'open') return { kind:'Call', band:'green', src:'HYBRID' };
+    if (clsC === 'mix')  return { kind:'Call', band:'amber', src:'HYBRID' };
   } catch(e){}
 
   // Nothing matched → Fold
@@ -3043,77 +2181,66 @@ const defendToggleHtml = `
   }
 
   // **** JSON preference for OPEN ****
-  function classMapOpen() {
-           try{
-                   if (hasNonEmptySeatBucket(RANGES_JSON?.open, seat)){
-                  return mapFromFreqBucket(RANGES_JSON.open[seat]);
-               }
-          }catch(e){/* fallback */}
-
-    const exp = (typeof EXPLICIT_OPEN !== 'undefined') ? EXPLICIT_OPEN[seat] : undefined
-    if (exp && (exp.OPEN_GREEN?.size || exp.OPEN_AMBER?.size)) {
-      const map = new Map();
-      for (let i=0;i<RANKS_ASC.length;i++){
-        for (let j=0;j<RANKS_ASC.length;j++){
-          const r1=RANKS_ASC[i], r2=RANKS_ASC[j];
-          let code;
-          if (i===j) code=r1+r2;
-          else if (i<j) code=r1+r2+'s';
-          else code=r2+r1+'o';
-          let cls='fold';
-          if (exp.OPEN_GREEN?.has(code)) cls='open';
-          else if (exp.OPEN_AMBER?.has(code)) cls='mix';
-          map.set(code, cls);
+function classMapOpen() {
+    // JSON-only open-range map.
+    try {
+        if (hasNonEmptySeatBucket(RANGES_JSON?.open, seat)) {
+            return mapFromFreqBucket(RANGES_JSON.open[seat]);
         }
-      }
-      return map;
+    } catch (e) {
+        /* ignore */
     }
-    // Fallback: if a seat isn't defined explicitly, use hybrid tokens
-    return buildClassMapForPos(seat);
-  }
+
+    // No fallback.
+    return null;
+}
 
   // **** JSON preference for 3BET ****
   function classMap3bet(vsSeat) {
-    try{
-      const key = `${seat}_vs_${vsSeat}`;
-      if (RANGES_JSON?.three_bet?.[key]){
-        return mapFromFreqBucket(RANGES_JSON.three_bet[key]);
-      }
-    }catch(e){/* fallback */}
-    const branch = HYBRID_3BET_RANGES[seat]?.[vsSeat] ?? null;
-    return classMapFromLists(branch);
-  }
+    try {
+        const key = vsKey(seat, vsSeat);
+        const bucket = RANGES_JSON?.three_bet?.[key];
+        if (bucket) return mapFromFreqBucket(bucket);
+    } catch (e) {
+        /* ignore */
+    }
+
+    return null;
+}
 
 // **** JSON preference for DEFEND / VS‑OPEN ****
 // subAction: 'call' | 'three_bet'
 
-	function classMapDefend(vsSeat, subAction) {
-  // 3‑bet path delegates to three_bet map for all seats
-  	if (subAction === 'three_bet') {
-  	  return classMap3bet(vsSeat);
- 	 }
-  // CALL path
-  	if (seat === 'BB') {
-    // BB defend flats from 'defend.BB_vs_<Opener>'
-  	  try{
-      const key = `BB_vs_${vsSeat}`;
-      if (RANGES_JSON?.defend?.[key]){
-        return mapFromFreqBucket(RANGES_JSON.defend[key]);
-      }
-   	 }catch(e){/* fallback */}
-    	const branch = HYBRID_DEFEND_RANGES[vsSeat] ?? null;
-   	 return classMapFromLists(branch);
- 	 } else {
-    // Non‑BB: use vs_open.<Seat>_vs_<Opener>.call
-  		  try{
-     		 const key = `${seat}_vs_${vsSeat}`;
-      		const callObj = RANGES_JSON?.vs_open?.[key]?.call;
-     		 if (callObj) return mapFromFreqBucket(callObj);
-   		 }catch(e){/* ignore */}
-    		// no data
-    		return null;
- 	 }
-	}
+function classMapDefend(vsSeat, subAction) {
+    // 3‑bet defend → use JSON three_bet
+    if (subAction === 'three_bet') {
+        return classMap3bet(vsSeat);
+    }
+
+    // CALL defend
+    // BB uses defend.BB_vs_<opener>
+    if (seat === 'BB') {
+        try {
+            const key = `BB_vs_${vsSeat}`;
+            const bucket = RANGES_JSON?.defend?.[key];
+            if (bucket) return mapFromFreqBucket(bucket);
+        } catch (e) {
+            /* ignore */
+        }
+        return null;
+    }
+
+    // Non‑BB calls: vs_open.<Seat>_vs_<opener>.call
+    try {
+        const key = vsKey(seat, vsSeat);
+        const bucket = RANGES_JSON?.vs_open?.[key]?.call;
+        if (bucket) return mapFromFreqBucket(bucket);
+    } catch (e) {
+        /* ignore */
+    }
+
+    return null;
+}
 
   function renderGridOrEmpty(clsMap){
     if (!clsMap) {
@@ -3141,8 +2268,7 @@ const defendToggleHtml = `
     gridContainer.innerHTML = html;
   }
 
-const sourceLabel = (RANGES_JSON?.open?.[currentPosition()]) ? 'JSON' :
-                    ((typeof EXPLICIT_OPEN !== 'undefined') ? 'Explicit' : 'Hybrid');
+const sourceLabel = 'JSON';
 
 // (existing, unchanged in your file)
 rangeModalBody.innerHTML = controlsHtml + defendToggleHtml +
@@ -3161,14 +2287,7 @@ const defendToggle = () => document.getElementById('defendToggle');
 // === Context-aware initial render (replaces old "Initial render: OPEN" + BB UX) ===
 const opener = ENGINE.preflop?.openerSeat ?? null;
 const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
-
-// Ensure we have a badge classification available in this scope
-let badgeRec = null;
-try {
-  badgeRec = classifyHeroPreflopBadge(); // { kind, band, src }
-} catch (e) {
-  badgeRec = null;
-}
+const badgeRec = classifyHeroPreflopBadge(); 
 
 let initialMode = 'open';
 let initialDefendSub = 'call';
@@ -3180,7 +2299,7 @@ if (threeBetter) {
   if (vsSel) { vsSel.disabled = false; vsSel.value = threeBetter; }
 } else if (opener) {
   initialMode = 'defend';
-  initialDefendSub = (badgeRec && badgeRec.kind === '3-Bet') ? 'three_bet' : 'call';
+  initialDefendSub = (badgeRec.kind === '3-Bet') ? 'three_bet' : 'call';
   if (vsSel) { vsSel.disabled = false; vsSel.value = opener; }
 }
 
@@ -3428,67 +2547,192 @@ function boardPairedRankAtMost(board, maxRankChar){
   const maxIdx=order.indexOf(maxRankChar);
   return Object.keys(map).some(r => map[r]>=2 && order.indexOf(r)<=maxIdx);
 }
-function mapBoardToCategory(board, hole){
-  const tex = analyzeBoard(board, hole);
-  if (tex.fourToStraight) return "FOUR_TO_STRAIGHT";
-  if (tex.mono) return "MONOTONE";
-  const suits = new Set(board.map(c=>c.suit));
-  const twoTone = (board.length>=3 && suits.size===2 && !tex.mono);
-  if (twoTone && (tex.connected || boardHasManyBroadways(board))) return "TWO_TONE_DYNAMIC";
-  if (boardPairedRankAtMost(board, "9")) return "PAIRED_LOW";
-  if (boardPairedRankAtMost(board, "A") && !boardPairedRankAtMost(board, "9")) return "HIGH_PAIR";
-  if (isAHighRainbowDry(board)) return "A_HIGH_RAINBOW";
-  if (boardHasManyBroadways(board)) return "BROADWAY_HEAVY";
-  return "LOW_DISCONNECTED";
+
+// === Improved Board → Category mapping (Option A refinement) ===
+function mapBoardToCategory(board, hole) {
+    const tex = analyzeBoard(board, hole);   // your detailed texture engine
+    const ranks = board.map(c => c.rank);
+
+    // ---- 1. Four-to-straight takes absolute priority ----
+    if (tex.fourToStraight) {
+        return "FOUR_TO_STRAIGHT";
+    }
+
+    // ---- 2. Monotone boards (always low-frequency spots) ----
+    if (tex.mono) {
+        return "MONOTONE";
+    }
+
+    // ---- 3. Two-tone dynamic boards (connected OR broadway-heavy) ----
+    const suits = new Set(board.map(c => c.suit));
+    const twoTone = (board.length >= 3 && suits.size === 2 && !tex.mono);
+
+    if (twoTone && (tex.connected || boardHasManyBroadways(board))) {
+        return "TWO_TONE_DYNAMIC";
+    }
+
+    // ---- 4. Low paired vs high paired ----
+    const pairedRankCounts = {};
+    board.forEach(c => pairedRankCounts[c.rank] = (pairedRankCounts[c.rank] ?? 0) + 1);
+
+    const pairedRanks = Object.entries(pairedRankCounts)
+        .filter(([, count]) => count >= 2)
+        .map(([r]) => r);
+
+    if (pairedRanks.length > 0) {
+        const pr = pairedRanks[0]; // only one pair possible on flop
+        const order = ["2","3","4","5","6","7","8","9","T","J","Q","K","A"];
+        const idx = order.indexOf(pr);
+
+        // Low paired = <=9
+        if (idx <= order.indexOf("9")) return "PAIRED_LOW";
+
+        // High paired = T+
+        return "HIGH_PAIR";
+    }
+
+    // ---- 5. A-high rainbow dry (solver favourite) ----
+    const hasAce = ranks.includes("A");
+    const suitsCount = new Set(board.map(c => c.suit)).size;
+    const isRainbow = (suitsCount >= 3);
+
+    if (hasAce && isRainbow && !tex.connected && !tex.fourToStraight) {
+        return "A_HIGH_RAINBOW";
+    }
+
+    // ---- 6. Broadway-heavy (Q-J-T or two+ broadways) ----
+    if (boardHasManyBroadways(board)) {
+        return "BROADWAY_HEAVY";
+    }
+
+    // ---- 7. Default fallback: low disconnected boards ----
+    return "LOW_DISCONNECTED";
 }
+
+
 function openGuideModalFor(categoryKey){
-  if (!guideModalOverlay || !guideModalBody) return;
-  const g = CBET_GUIDE[categoryKey];
-  if (!g) {
-    guideModalBody.innerHTML = `
-      <div style="color:#9aa3b2">No guide available for this texture (key: <code>${categoryKey || 'unknown'}</code>).</div>
-    `;
-    guideModalOverlay.classList.remove('hidden');
-    return;
-  }
-  // Header labels: 25% / 33% / ... (kept)
-  const hdr = ['<div class="hdr"></div>']
-    .concat(POSTFLOP_SIZE_PRESETS.map(s => `<div class="hdr">${s}%</div>`))
-    .join('');
+    if (!guideModalOverlay || !guideModalBody) return;
 
-  // Which bucket class applies to a given size
-  const freqClass = (pct) => {
-    if (g.sizes.includes(pct)) return 'freq-high';
-    const near = g.sizes.some(x => Math.abs(x - pct) <= (pct >= 100 ? 25 : 17));
-    return near ? 'freq-med' : 'freq-low';
-  };
+    const g = CBET_GUIDE[categoryKey];
+    if (!g) {
+        guideModalBody.innerHTML = `
+            <div style="color:#9aa3b2">No guide available for this texture (key: <code>${categoryKey || 'unknown'}</code>).</div>
+        `;
+        guideModalOverlay.classList.remove('hidden');
+        return;
+    }
 
-  const cells = POSTFLOP_SIZE_PRESETS.map(pct => {
-    const klass = freqClass(pct);
-    const aria = (klass === 'freq-high') ? 'High (recommended)' : (klass === 'freq-med' ? 'Medium (adjacent)' : 'Low');
-    return `
-      <div class="cell ${klass}" aria-label="${pct}% · ${aria}" title="${pct}% — ${aria}">
-        <span class="dot">●</span>
+    //
+    // === STEP 1 — Summary bar (Module 2.4) ===
+    //
+    const summaryHtml = `
+      <div style="
+        display:flex;
+        align-items:center;
+        gap:10px;
+        padding:8px 0;
+        border-bottom:1px solid #3a3f4b;
+        margin-bottom:10px;
+      ">
+        <span class="badge info">Board Category</span>
+        <div style="font-weight:700">${g.label}</div>
+        <span class="badge blue">${g.freq} frequency</span>
+        <span class="badge gray">${fmtSizeRangePct(g.sizes)} sizing</span>
       </div>
     `;
-  }).join('');
 
-  guideModalBody.innerHTML = `
-    <div><strong>Board:</strong> ${g.label}</div>
-    <div class="guide-grid" style="margin-top:6px">
-      ${hdr}
-      <div class="rowhdr">${g.freq} c‑bet frequency</div>
-      ${cells}
-    </div>
-    <div class="legend">
-      <span class="chip hi">High (recommended)</span>
-      <span class="chip med">Medium (adjacent)</span>
-      <span class="chip low">Low</span>
-    </div>
-    <div style="margin-top:8px;color:#9aa3b2">${g.note}</div>
-  `;
-  guideModalOverlay.classList.remove('hidden');
+    //
+    // === STEP 2 — Category explanation ===
+    //
+    const explanationHtml = `
+      <div style="color:#9aa3b2; margin-bottom:10px; font-size:0.95rem;">
+        ${g.note}
+      </div>
+    `;
+
+    //
+    // === Build the headers for size grid ===
+    //
+    const hdr = ['<div class="hdr"></div>']
+      .concat(POSTFLOP_SIZE_PRESETS.map(s => `<div class="hdr">${s}%</div>`))
+      .join('');
+
+    //
+    // === Grid rows ===
+    //
+    const freqClass = (pct) => {
+        if (g.sizes.includes(pct)) return 'freq-high';
+        const near = g.sizes.some(x => Math.abs(x - pct) <= (pct >= 100 ? 25 : 17));
+        return near ? 'freq-med' : 'freq-low';
+    };
+
+    const cells = POSTFLOP_SIZE_PRESETS.map(pct => {
+        const klass = freqClass(pct);
+
+        // === STEP 4 — Improved accessibility tooltips ===
+        const aria =
+            klass === 'freq-high'
+                ? 'High frequency — recommended small bet'
+                : klass === 'freq-med'
+                ? 'Medium frequency — mixed strategy'
+                : 'Low frequency — seldom bet on this texture';
+
+        return `
+          <div class="cell ${klass}" title="${aria}" aria-label="${aria}">
+            <span class="dot">●</span>
+          </div>
+        `;
+    }).join('');
+
+    //
+    // === Write modal HTML (header + explanation + grid) ===
+    //
+    guideModalBody.innerHTML = `
+      ${summaryHtml}
+      ${explanationHtml}
+
+      <div class="guide-grid" style="margin-top:6px">
+        ${hdr}
+        <div class="rowhdr">${g.freq} c‑bet frequency</div>
+        ${cells}
+      </div>
+
+      <div class="legend">
+        <span class="chip hi">High (recommended)</span>
+        <span class="chip med">Medium (adjacent)</span>
+        <span class="chip low">Low</span>
+      </div>
+    `;
+
+    //
+    // === STEP 5 — Example Strategy Banner ===
+    //
+    guideModalBody.insertAdjacentHTML(
+      'beforeend',
+      `
+      <div style="
+         margin-top:12px;
+         padding:10px;
+         background:#1f2937;
+         border-radius:6px;
+         color:#cdd3dd;
+         font-size:0.95rem;
+      ">
+        <strong>Example Strategy:</strong>
+        ${
+          g.freq === 'High'
+            ? 'Frequent small bets with strong range advantage.'
+            : g.freq === 'Med'
+            ? 'Mix checks and small/medium bets depending on range interaction.'
+            : 'Check most hands; when betting, use larger polarized bets.'
+        }
+      </div>
+      `
+    );
+
+    guideModalOverlay.classList.remove('hidden');
 };
+
 function closeGuideModal(){ if (guideModalOverlay) guideModalOverlay.classList.add('hidden'); }
 
 // ===== Decision label + size rows =====
@@ -3621,28 +2865,52 @@ function evalSizeAgainstGuide(chosenPct, guideSizes){
   return { verdict:'Too large', detail:'Much larger than the usual sizes for this texture.' };
 }
 
-function evaluateFlopCbet(catKey, isHeroPFR, pos, action, sizePct){
-  const g = CBET_GUIDE[catKey];
-  if (!g) return { cbetEval:'n/a', sizeEval:'n/a', note:'No guide available for this texture.' };
-  if (!isHeroPFR) return { cbetEval:'Not PFR', sizeEval:'n/a', note:'You are not the preflop raiser — c‑bet guidance does not apply.' };
+function evaluateFlopCbet(catKey, isHeroPFR, pos, action, sizePct) {
+    const g = CBET_GUIDE[catKey];
+    if (!g) {
+        return { cbetEval:"n/a", sizeEval:"n/a", note:"No guide available for this texture." };
+    }
+    if (!isHeroPFR) {
+        return { cbetEval:"Not PFR", sizeEval:"n/a", note:"You were not the preflop raiser — flop c‑bet guidance does not apply." };
+    }
 
-  const freq=g.freq; let cbetEval='Mixed';
-  if (freq==='High') cbetEval = (action==='bet') ? 'Correct' : 'Missed c‑bet (okay sometimes)';
-  if (freq==='Med')  cbetEval = (action==='bet') ? 'Okay (mix)' : 'Okay (mix)';
-  if (freq==='Low')  cbetEval = (action==='bet') ? 'Low‑freq spot (be selective)' : 'Fine to check more';
+    const freq = g.freq; // "High"|"Med"|"Low"
+    let cbetEval = "Mixed";
+    if (freq === "High") cbetEval = (action === "bet") ? "Correct (frequent c‑bet)" : "Missed c‑bet (okay sometimes)";
+    else if (freq === "Med") cbetEval = (action === "bet") ? "Good (mixing spot)" : "Okay (mixing spot)";
+    else if (freq === "Low") cbetEval = (action === "bet") ? "Risky c‑bet (low‑freq texture)" : "Correct (check more often)";
 
-  const ip=inPositionHeuristic(pos);
-  let posNote='';
-  if (ip && action==='bet' && freq!=='Low') posNote=' Being in position increases comfort for small, frequent bets.';
-  if (!ip && action==='bet' && freq!=='High') posNote=' Out of position → consider more checks or larger, polar bets when you do bet.';
+    const sizeRes = evalSizeAgainstGuide(sizePct, g.sizes);
+    const sizeEval = sizeRes.verdict ?? "n/a";
+    const sizeNote = sizeRes.detail ?? "";
 
-  const sizeRes = evalSizeAgainstGuide(sizePct, g.sizes);
-  const sizeEval=sizeRes.verdict, sizeNote=sizeRes.detail;
+    const ip = inPositionHeuristic(pos);
+    let positionalNote = "";
+    if (ip) {
+        if (freq === "High" && action === "bet") positionalNote = " You are in position — small, frequent bets perform well.";
+        if (freq === "Low"  && action === "bet") positionalNote = " Being in position helps, but this is still a low‑frequency texture.";
+    } else {
+        if (action === "bet" && freq !== "High") positionalNote = " Out of position → consider more checks or larger, polar bets.";
+    }
 
-  let note = `${g.label}: ${g.note}`;
-  note += posNote ? ` ${posNote}` : '';
-  if (sizeEval && sizeEval!=='n/a') note += ` Size: ${sizeEval}. ${sizeNote}`;
-  return { cbetEval, sizeEval, note, recFreq:g.freq, recSizes:fmtSizeRangePct(g.sizes) };
+    // === NEW (M3·S4): Append villain range context (flop) ===
+    const rng = villainRangeContextLine("flop");
+
+    let note = `${g.label}: ${g.note}`;
+    if (positionalNote) note += ` ${positionalNote}`;
+    if (sizeEval !== "n/a") note += ` Size: ${sizeEval}. ${sizeNote}`;
+    note += ` ${rng.line}`;
+
+    return {
+        cbetEval,
+        sizeEval,
+        note,
+        recFreq: freq,
+        recSizes: fmtSizeRangePct(g.sizes),
+        // NEW: expose the range numbers (for handHistory / CSV)
+        villainRangePct: rng.pct,
+        villainRangeLabel: rng.label
+    };
 }
 
 function classifyTransition(prevBoard, newBoard, hole){
@@ -3695,20 +2963,49 @@ function pickVillainSizePct(stage, board, hole){
 
 // --- Probability that a seat bets, given role/frequency and strength
 function villainBetProbability(seat, isPFR, stage, board, hole){
-  const catKey = mapBoardToCategory(board, hole);
-  const g = CBET_GUIDE[catKey];
-  let base = isPFR ? (VILLAIN.betFreq[g?.freq ?? "Med"] ?? 0.45)
-                   : (VILLAIN.probeFreq[g?.freq ?? "Med"] ?? 0.40);
+    const catKey = mapBoardToCategory(board, hole);
+    const g = CBET_GUIDE[catKey];
 
-  const strength = villainStrengthBucket(hole, board);
-  if (strength === "strong") base += 0.25;
-  else if (strength === "draw") base += 0.15;
-  else if (strength === "weak") base -= 0.15;
+    // Base frequencies from your existing guide
+    let base = isPFR 
+        ? (VILLAIN.betFreq[g?.freq ?? "Med"] ?? 0.45)
+        : (VILLAIN.probeFreq[g?.freq ?? "Med"] ?? 0.40);
 
-  // River: push aggression a tad when strong/draws are realised
-  if (stage === 'river' && (strength === "strong")) base += 0.10;
+    // === NEW: IP vs OOP adjustment ===
+    const heroSeat = currentPosition();
+    const VAL = ACTION_ORDER.indexOf(seat);
+    const HA = ACTION_ORDER.indexOf(heroSeat);
 
-  return Math.max(0.05, Math.min(0.95, base));
+    const villainIsIP = VAL > HA;
+    if (villainIsIP) {
+        base += 0.05;   // small IP bump
+    } else {
+        base -= 0.05;   // small OOP tightening
+    }
+
+    // === NEW: Board moisture tuning ===
+    const tex = analyzeBoard(board, hole);
+    if (tex.moistureBucket === "Wet") base -= 0.10;
+    if (tex.moistureBucket === "Semi-wet") base -= 0.05;
+
+    // === NEW: Villain profile tuning ===
+    const letter = LETTERS_BY_POSITION?.[seat];
+    const persona = SESSION_PERSONA_BY_LETTER?.[letter];
+
+    if (persona === "MANIAC") base += 0.25;
+    if (persona === "LAG") base += 0.10;
+    if (persona === "STATION") base -= 0.10;
+    if (persona === "NIT") base -= 0.15;
+
+// === NEW: Range-tightness adjustment ===
+const tightness = ENGINE.villainRange?.[stage] ?? 100;
+const rangePressure = (100 - tightness) / 300;
+base -= rangePressure;
+
+    // Clamp to safe range
+    base = Math.max(0.05, Math.min(0.95, base));
+
+    return base;
 }
 
 function postflopVillainActionsUpToHero(stage){
@@ -3766,21 +3063,50 @@ if (state !== "in") continue;
         continue;
       }
     } else {
-      // There is a live bet; this seat decides to fold/call/raise
-      const strength = villainStrengthBucket(hole, boardCards);
+     
+// === Improved raise logic ===
+const strength = villainStrengthBucket(hole, boardCards);
+const tex = analyzeBoard(boardCards, holeCards);
 
-      // Rare raise
-      const willRaise = Math.random() < VILLAIN.raiseOverBetFreq && (strength === 'strong' || strength === 'draw');
-      if (willRaise){
-        // Make a bigger size over pot (raise-to, not increment); prefer 75%+ on turns/rivers
-        const pct = Math.max(66, pickVillainSizePct(stage, boardCards, holeCards));
-        const raiseTo = Math.max(pendingToCall * 2, toStep5((pct/100) * pot)); // "to call" for hero will become this
-        pendingToCall = raiseTo;
-        scenario = { label: `${seat} raises to ${pct}%`, potFactor: 0 };
-        betOwner = seat; // latest aggressor
-        continue;
-      }
+// Get villain persona for more realistic behaviour
+const letter = LETTERS_BY_POSITION?.[seat];
+const persona = SESSION_PERSONA_BY_LETTER?.[letter];
 
+// Base chance to raise (from your VILLAIN settings)
+let raiseChance = VILLAIN.raiseOverBetFreq;
+
+// Persona adjustments
+if (persona === "MANIAC") raiseChance += 0.15;
+if (persona === "LAG")    raiseChance += 0.05;
+if (persona === "STATION")raiseChance -= 0.05;
+if (persona === "NIT")    raiseChance -= 0.10;
+
+// Texture-based caps
+if (tex.moistureBucket === "Wet") raiseChance *= 0.50;
+if (tex.fourToStraight)           raiseChance *= 0.40;
+if (tex.mono)                     raiseChance *= 0.30;
+
+// === NEW: range-tightness dampening ===
+const tightness = ENGINE.villainRange?.[stage] ?? 100;
+raiseChance -= (100 - tightness) / 250;
+
+// Clamp to safe range
+raiseChance = Math.max(0.01, Math.min(0.50, raiseChance));
+
+// FINAL raise decision
+const willRaise = Math.random() < raiseChance &&
+    (strength === 'strong' || strength === 'draw');
+
+if (willRaise) {
+    // Raise-to sizing (not raise increment)
+    const pct = Math.max(66, pickVillainSizePct(stage, boardCards, holeCards));
+    const raiseTo = Math.max(pendingToCall * 2, toStep5((pct / 100) * pot));
+    pendingToCall = raiseTo;
+
+    scenario = { label: `${seat} raises to ${pct}%`, potFactor: 0 };
+
+    continue;   // Continue processing later seats
+}
       // Decide to fold if weak vs price; else call (we don't add to pot yet)
       if (strength === 'weak' || strength === 'weak_draw'){
         if (Math.random() < VILLAIN.foldFracFacingBetWeak){
@@ -3807,19 +3133,20 @@ if (toCall <= 0) {
 // Villains act behind Hero if Hero checked (or did not open the betting)
 // Simulates one "betting opportunity" behind Hero: first live bettor may bet; later seats may fold/call/rare-raise.
 function villainsActAfterHeroCheck(stage) {
-
   // If a live price already exists, do not produce another stab
   if (toCall > 0) { updatePotInfo(); return; }
 
   const heroSeat = currentPosition();
 
+  // Build acting sequence starting after hero, wrapping around to just before hero
+  const order = POSTFLOP_ORDER.slice(); // ["SB","BB","UTG","HJ","CO","BTN"]
+  const startIdx = order.indexOf(heroSeat);
+  if (startIdx < 0) return;
 
-// Build acting sequence only for seats *after* hero; do NOT wrap.
- const order = POSTFLOP_ORDER.slice(); // ["SB","BB","UTG","HJ","CO","BTN"]
-const startIdx = order.indexOf(heroSeat);
-if (startIdx < 0) return;
-const seq = order.slice(startIdx + 1); // act only behind Hero this street
-
+  const seq = [];
+  for (let k = (startIdx + 1) % order.length; k !== startIdx; k = (k + 1) % order.length) {
+    seq.push(order[k]);
+  }
   if (seq.length === 0) return;
 
   let pendingToCall = 0;
@@ -3834,40 +3161,129 @@ const seq = order.slice(startIdx + 1); // act only behind Hero this street
 
     const isPFR = (ENGINE.preflop.openerSeat === seat);
 
+    // -------------------------
+    // No live price -> probe or check
+    // -------------------------
     if (pendingToCall === 0) {
-      // Seat may start the betting (probe/stab)
-      const p = villainBetProbability(seat, isPFR, stage, boardCards, holeCards);
+      // Context
+      const tex = analyzeBoard(boardCards, holeCards);
+      const letter = LETTERS_BY_POSITION?.[seat];
+      const persona = SESSION_PERSONA_BY_LETTER?.[letter];
+
+      // Base model
+      let p = villainBetProbability(seat, isPFR, stage, boardCards, holeCards);
+
+      // Multiway dampening (don’t stab into crowds)
+      const aliveOthers = POSTFLOP_ORDER
+        .filter(s2 => s2 !== heroSeat && s2 !== seat && ENGINE.statusBySeat[s2] === 'in').length;
+      if (aliveOthers >= 2) p -= 0.15;       // 3+ way
+      else if (aliveOthers === 1) p -= 0.05; // exactly one other villain alive
+
+      // IP/OOP nudges (small)
+      const iVill = ACTION_ORDER.indexOf(seat);
+      const iHero = ACTION_ORDER.indexOf(heroSeat);
+      const villainIsIP = iVill > iHero;
+      p += villainIsIP ? 0.05 : -0.05;
+
+      // Texture dampening (scary boards → fewer stabs)
+      if (tex.moistureBucket === 'Wet') p -= 0.10;
+      if (tex.fourToStraight)           p -= 0.12;
+      if (tex.mono)                     p -= 0.10;
+      if (tex.paired)                   p -= 0.05;
+
+      // Persona nudges
+      if (persona === 'MANIAC')  p += 0.15;
+      if (persona === 'LAG')     p += 0.05;
+      if (persona === 'STATION') p -= 0.08;
+      if (persona === 'NIT')     p -= 0.12;
+
+      // Range‑tightness effect (Module 3 Step 3)
+      const tightness = ENGINE.villainRange?.[stage] ?? 100;
+      p -= (100 - tightness) / 300;
+
+      // Difficulty (Module 2.5)
+      if (difficulty === "beginner") p -= 0.10;
+      if (difficulty === "expert")   p += 0.10;
+
+      // Clamp
+      p = Math.max(0.02, Math.min(0.85, p));
+
+      // Fire the probe?
       if (Math.random() < p) {
+        // Choose size vs current pot (still do NOT add to pot here)
         const pct = pickVillainSizePct(stage, boardCards, holeCards);
         const amt = Math.max(5, toStep5((pct/100) * pot));
-        pendingToCall = amt;
 
-        // Update scenario / context (consistent with your pre-hero pass)
+        pendingToCall = amt;
         scenario = { label: `${seat} bets ${pct}%`, potFactor: 0 };
         STREET_CTX.openBettor = seat;
         STREET_CTX.openSizePct = pct;
-        continue; // allow later seats to react
-      } else {
-        continue; // checked; move on
-      }
-    } else {
-      // A live bet exists; this seat reacts
-      const strength = villainStrengthBucket(hole, boardCards);
+        STREET_CTX.openBetToCall = amt;
 
-      // Rare raises
-      const willRaise = Math.random() < VILLAIN.raiseOverBetFreq && (strength === 'strong' || strength === 'draw');
-      if (willRaise) {
-        const pct = Math.max(66, pickVillainSizePct(stage, boardCards, holeCards));
-        const raiseTo = Math.max(pendingToCall * 2, toStep5((pct/100) * pot)); // raise-to (keeps your model)
-        pendingToCall = raiseTo;
-        scenario = { label: `${seat} raises to ${pct}%`, potFactor: 0 };
-        continue;
+        // Call #2 insert: probe updates the range as a "bet"
+        updateVillainRange(stage, "bet");
+        continue; // allow later seats to respond
       }
 
-      // Weak hands fold some of the time; others notionally call (we do not add to pot yet; hero sees the price first)
-      if ((strength === 'weak' || strength === 'weak_draw') && Math.random() < VILLAIN.foldFracFacingBetWeak) {
-        ENGINE.statusBySeat[seat] = "folded_now";
-      }
+      // Otherwise: explicitly register a CHECK and move on
+      updateVillainRange(stage, "check");
+      continue;
+    }
+
+    // -------------------------
+    // Live price exists -> fold / notionally call / raise
+    // -------------------------
+    const tex = analyzeBoard(boardCards, holeCards);
+    const letter = LETTERS_BY_POSITION?.[seat];
+    const persona = SESSION_PERSONA_BY_LETTER?.[letter];
+
+    // Improved raise logic (Module 2.2) + range‑tightness
+    let raiseChance = VILLAIN.raiseOverBetFreq;
+
+    // Persona adjustments
+    if (persona === "MANIAC")  raiseChance += 0.15;
+    if (persona === "LAG")     raiseChance += 0.05;
+    if (persona === "STATION") raiseChance -= 0.05;
+    if (persona === "NIT")     raiseChance -= 0.10;
+
+    // Texture caps
+    if (tex.moistureBucket === "Wet") raiseChance *= 0.50;
+    if (tex.fourToStraight)           raiseChance *= 0.40;
+    if (tex.mono)                     raiseChance *= 0.30;
+
+    // Range‑tightness dampening (raises shrink more aggressively)
+    const tightness2 = ENGINE.villainRange?.[stage] ?? 100;
+    raiseChance -= (100 - tightness2) / 250;
+
+    // Clamp
+    raiseChance = Math.max(0.01, Math.min(0.50, raiseChance));
+
+    // Bucket strength and decide whether to raise
+    const strength = villainStrengthBucket(hole, boardCards);
+    const willRaise = (strength === 'strong' || strength === 'draw') && (Math.random() < raiseChance);
+
+    if (willRaise) {
+      // “Raise‑to” model: at least 2x current price, or a size derived from % pot
+      const pct = Math.max(66, pickVillainSizePct(stage, boardCards, holeCards));
+      const raiseTo = Math.max(pendingToCall * 2, toStep5((pct / 100) * pot));
+
+      pendingToCall = raiseTo;
+      STREET_CTX.openBetToCall = raiseTo;
+      scenario = { label: `${seat} raises to ${pct}%`, potFactor: 0 };
+
+      // Call #2 insert: raising updates the range
+      updateVillainRange(stage, "raise");
+      continue;
+    }
+
+    // Weak hands fold some of the time; others notionally call (no pot add yet)
+    if ((strength === 'weak' || strength === 'weak_draw') && Math.random() < VILLAIN.foldFracFacingBetWeak) {
+      ENGINE.statusBySeat[seat] = "folded_now";
+
+      // Call #2 insert: folding updates the range
+      updateVillainRange(stage, "fold");
+      // NOTE: strong/medium hands that "notionally call" are left untouched here;
+      // we update range on actual pot moves in settleVillainsAfterHero(stage,...)
     }
   }
 
@@ -3884,121 +3300,262 @@ const seq = order.slice(startIdx + 1); // act only behind Hero this street
     scenario = { label: "Checks through" };
   }
 }
-function settleVillainsAfterHero(stage, heroAction){
-  // Only simulate extra callers when hero made an aggressive action without a live bet
-  if (!(heroAction === 'bet' || heroAction === 'raise' || heroAction === 'call')) return;
 
-  // If hero 'bet' (no live bet), estimate hero's bet size from pot at start of street
-  if (heroAction === 'bet' && (heroActions[stage]?.sizePct != null)) {
-    const pct = Number(heroActions[stage].sizePct) || 0;
-    const betAmt = Math.max(5, toStep5((pct/100) * STREET_CTX.potAtStart));
+function settleVillainsAfterHero(stage, heroAction) {
+  // Only simulate extra callers when hero starts the betting this street (no live price before hero).
+  // This mirrors the original design: one decision per street for hero.
+  if (!(stage === 'flop' || stage === 'turn' || stage === 'river')) return;
+  if (heroAction !== 'bet') return;
 
-    // Estimate how many villains continue behind: use currently 'in' seats excluding hero
-    const aliveSeats = POSTFLOP_ORDER.filter(s => s !== currentPosition() && ENGINE.statusBySeat[s] === 'in');
-    const callers = Math.round(aliveSeats.length * VILLAIN.callFracAfterHeroBet);
+  // Require a size to determine the live price others face
+  const pct = Number(heroActions?.[stage]?.sizePct ?? 0);
+  if (!isFinite(pct) || pct <= 0) return;
 
-    // Add their calls to pot (hero's bet was already added in applyHeroContribution)
-    const added = callers * betAmt;
-    if (added > 0){
-      pot = toStep5(pot + added);
-      updatePotInfo();
+  // Price to call is based on the pot at the start of the street (your model)
+  const betAmt = Math.max(5, toStep5((pct / 100) * STREET_CTX.potAtStart));
+
+  // Build acting sequence strictly AFTER hero, wrapping back to just before hero
+  const heroSeat = currentPosition();
+  const order = POSTFLOP_ORDER.slice(); // ["SB","BB","UTG","HJ","CO","BTN"]
+  const startIdx = order.indexOf(heroSeat);
+  if (startIdx < 0) return;
+
+  const seq = [];
+  for (let k = (startIdx + 1) % order.length; k !== startIdx; k = (k + 1) % order.length) {
+    seq.push(order[k]);
+  }
+  if (seq.length === 0) return;
+
+  // Context shared for all decisions behind hero
+  const tex = analyzeBoard(boardCards, holeCards);
+  const newCallers = [];
+
+  // Walk the seats after hero and decide call/fold
+  for (const seat of seq) {
+    // Must be alive to act
+    if (ENGINE.statusBySeat[seat] !== 'in') continue;
+
+    // Base call probability from your settings (training simplification)
+    let pCall = Number(VILLAIN.callFracAfterHeroBet ?? 0.35);
+
+    // Persona nudges
+    const letter = LETTERS_BY_POSITION?.[seat];
+    const persona = SESSION_PERSONA_BY_LETTER?.[letter];
+    if (persona === 'MANIAC')  pCall += 0.10;
+    if (persona === 'LAG')     pCall += 0.05;
+    if (persona === 'STATION') pCall += 0.15;
+    if (persona === 'NIT')     pCall -= 0.15;
+
+    // Texture nudges (on dynamic boards calling is a bit more attractive)
+    if (tex.moistureBucket === 'Wet')  pCall += 0.05;
+    if (tex.fourToStraight)            pCall += 0.03;
+    if (tex.mono)                      pCall += 0.02;
+
+    // Range‑tightness influence (Module 3 Step 3): tighter ranges continue more
+    const tightness = ENGINE.villainRange?.[stage] ?? 100; // 0–100
+    pCall += (100 - tightness) / 300; // up to ~0.33 boost if very tight
+
+    // Difficulty nudges (Module 2.5)
+    if (difficulty === "beginner") pCall -= 0.08;
+    if (difficulty === "expert")   pCall += 0.08;
+
+    // Clamp to sane range
+    pCall = Math.max(0.02, Math.min(0.95, pCall));
+
+    // Decide
+    if (Math.random() < pCall) {
+      // CALL: add this villain's call to the pot now
+      pot = toStep5(pot + betAmt);
+      newCallers.push(seat);
+
+      // Range update: they continued
+      updateVillainRange(stage, "call");
+    } else {
+      // FOLD for visuals and downstream logic
+      ENGINE.statusBySeat[seat] = "folded_now";
+
+      // Range update: they folded
+      updateVillainRange(stage, "fold");
     }
   }
+
+  // Nice label updates for the UI (as in your earlier logic)
+  if (newCallers.length === 1) appendScenarioNote(`${newCallers[0]} calls`);
+  if (newCallers.length > 1) appendScenarioNote(`${newCallers.length} callers`);
+
+  // After hero acts and we settle behind, hero has no price to call
+  toCall = 0;
+  updatePotInfo();   // refresh KPI chips, labels, etc.
 }
 
-function evaluateBarrel(stage, prevBoard, currBoard, isHeroPFR, pos, prevAggressive, action, sizePct){
-  if (!isHeroPFR) return { barrelEval:'Not PFR', sizeEval:'n/a', note:'You are not PFR — default is to be selective with stabs.' };
+function evaluateBarrel(stage, prevBoard, currBoard, isHeroPFR, pos, prevAggressive, action, sizePct) {
+    if (!isHeroPFR) {
+        return { barrelEval:"Not PFR", sizeEval:"n/a", note:"You were not the preflop aggressor — selective stabbing recommended.", recFreq:"", recSizes:"" };
+    }
+    const trans = classifyTransition(prevBoard, currBoard, holeCards);
+    const catKey = mapBoardToCategory(currBoard, holeCards);
+    const g = CBET_GUIDE[catKey];
+    const ip = inPositionHeuristic(pos);
 
-  const trans = classifyTransition(prevBoard, currBoard, holeCards);
-  const ip = inPositionHeuristic(pos);
+    let barrelEval = "Mixed";
+    let reasons = [];
+    if (trans.goodForPFR && !trans.badForPFR) {
+        barrelEval = (action === "bet" || action === "raise") ? "Good continue" : "OK to slow down";
+        reasons.push("Turn/River card improves aggressor advantage.");
+    } else if (trans.badForPFR && !trans.goodForPFR) {
+        barrelEval = (action === "bet" || action === "raise") ? "Risky barrel" : "Prudent check more";
+        reasons.push("This card heavily favours the caller’s range.");
+    } else {
+        barrelEval = "Mixed (neutral runout)";
+        reasons.push("Neutral card — mix checks/bets.");
+    }
 
-  let barrelEval='Mixed', logicNote=[];
-  if (trans.goodForPFR && !trans.badForPFR){
-    barrelEval = (action==='bet'||action==='raise') ? 'Good continue' : 'Okay to slow down';
-    logicNote.push('Overcard favours aggressor; continuing is reasonable.');
-  } else if (trans.badForPFR && !trans.goodForPFR){
-    barrelEval = (action==='bet'||action==='raise') ? 'Risky barrel' : 'Prudent check more';
-    if (trans.gotMonotone)        logicNote.push('Board turned monotone — equities compress; reduce barrel frequency.');
-    if (trans.nowFourToStraight)  logicNote.push('Four‑to‑straight appears — ranges tighten; prefer polar bets if continuing.');
-    if (trans.boardPairedUp)      logicNote.push('Board paired — boats/quads live; slow down frequency.');
-  } else {
-    barrelEval='Mixed (neutral card)'; logicNote.push('Neutral runout — mix checks and medium‑sized barrels.');
-  }
+    const sizeRes = evalSizeAgainstGuide(sizePct, g ? g.sizes : null);
+    const sizeEval = sizeRes.verdict ?? "n/a";
+    const sizeNote = sizeRes.detail ?? "";
 
-  const cat = mapBoardToCategory(currBoard, holeCards);
-  const g = CBET_GUIDE[cat];
-  const sizeRes = evalSizeAgainstGuide(sizePct, g ? g.sizes : null);
-  const sizeEval = sizeRes.verdict, sizeNote=sizeRes.detail;
+    let posNote = "";
+    if (ip) {
+        if ((action === "bet" || action === "raise") && g && g.freq === "High") posNote = "Being in position supports continued pressure.";
+    } else {
+        if (action === "bet" && g && g.freq !== "High") posNote = "Out of position — prefer checks or larger polar bets when continuing.";
+    }
 
-  if (!ip && (action==='bet'||action==='raise') && g && g.freq==='Low'){
-    logicNote.push('OOP on low‑freq textures → check more or size up when polarized.');
-  }
-  let note = `${g ? g.label : 'Texture'}: ${g ? g.note : 'No guide.'}`;
-  if (logicNote.length) note += ` ${logicNote.join(' ')}`;
-  if (sizeEval && sizeEval!=='n/a') note += ` Size: ${sizeEval}. ${sizeNote}`;
-  return { barrelEval, sizeEval, note, recFreq: g ? g.freq : '', recSizes: g ? fmtSizeRangePct(g.sizes) : '' };
+    // === NEW (M3·S4): Append villain range context (use stage param: 'turn' or 'river') ===
+    const stageKey = (stage === "turn" ? "turn" : "river");  // guard if someone calls with 'river'
+    const rng = villainRangeContextLine(stageKey);
+
+    let note = `${g ? g.label : "Texture"}: ${g ? g.note : "No guide available."}`;
+    if (reasons.length) note += " " + reasons.join(" ");
+    if (posNote) note += " " + posNote;
+    if (sizeEval !== "n/a") note += ` Size: ${sizeEval}. ${sizeNote}`;
+    note += ` ${rng.line}`;
+
+    return {
+        barrelEval,
+        sizeEval,
+        note,
+        recFreq: g ? g.freq : "",
+        recSizes: g ? fmtSizeRangePct(g.sizes) : "",
+        // NEW:
+        villainRangePct: rng.pct,
+        villainRangeLabel: rng.label
+    };
 }
 
 // ==================== Phase 4: Non-PFR probe & River line ====================
 function isProbeSpot(actionLabel){ return preflopAggressor!=='hero' && toCall===0 && (actionLabel==='bet' || actionLabel==='raise'); }
+
 function evaluateProbe(stage, catKey, pos, actionLabel, sizePct){
-  const ip = inPositionHeuristic(pos);
-  const g = CBET_GUIDE[catKey];
-  if (!g) return { probeEval:'n/a', sizeEval:'n/a', note:'No guide for this texture.' };
+    const ip = inPositionHeuristic(pos);
+    const g = CBET_GUIDE[catKey];
+    if (!g) return { probeEval:'n/a', sizeEval:'n/a', note:'No guide for this texture.', recSizes:'' };
 
-  let desirability='Medium';
-  if (catKey==='LOW_DISCONNECTED' || catKey==='PAIRED_LOW') desirability = ip ? 'High' : 'Medium';
-  if (catKey==='A_HIGH_RAINBOW' || catKey==='BROADWAY_HEAVY') desirability = 'Low';
-  if (catKey==='TWO_TONE_DYNAMIC') desirability='Medium';
-  if (catKey==='MONOTONE' || catKey==='FOUR_TO_STRAIGHT') desirability='Medium (polar)';
+    // Desirability (unchanged from your Module 2.3 patch)
+    let desirability = 'Medium';
+    if (catKey === 'LOW_DISCONNECTED')  desirability = ip ? 'High' : 'Medium';
+    if (catKey === 'PAIRED_LOW')        desirability = ip ? 'High' : 'Medium';
+    if (catKey === 'A_HIGH_RAINBOW')    desirability = 'Low';
+    if (catKey === 'BROADWAY_HEAVY')    desirability = 'Low';
+    if (catKey === 'TWO_TONE_DYNAMIC')  desirability = ip ? 'Medium' : 'Low';
+    if (catKey === 'MONOTONE')          desirability = 'Low';
+    if (catKey === 'FOUR_TO_STRAIGHT')  desirability = 'Low';
 
-  let probeEval='Mixed';
-  if (desirability.startsWith('High')) probeEval='Good probe (esp. IP)';
-  else if (desirability.startsWith('Medium')) probeEval='Okay (be selective)';
-  else probeEval='Risky probe (prefer checks)';
+    let probeEval = 'Mixed';
+    if (actionLabel === 'bet' || actionLabel === 'raise') {
+        if (desirability === 'High') probeEval = 'Good probe (esp. IP)';
+        else if (desirability === 'Medium') probeEval = 'Okay (be selective)';
+        else probeEval = 'Risky probe (prefer checks)';
+    } else {
+        if (desirability === 'High') probeEval = 'Okay to check sometimes';
+        else if (desirability === 'Medium') probeEval = 'Fine to check';
+        else probeEval = 'Correct to check';
+    }
 
-  let recSizes=g.sizes;
-  if (catKey==='LOW_DISCONNECTED') recSizes=[25,33,50];
-  if (catKey==='PAIRED_LOW')       recSizes=[33,50,66];
-  if (catKey==='FOUR_TO_STRAIGHT' || catKey==='MONOTONE') recSizes=[66,100,150];
+    let recSizes = g.sizes;
+    if (catKey === 'LOW_DISCONNECTED') recSizes = [25,33];
+    if (catKey === 'PAIRED_LOW')       recSizes = [33,50];
+    if (catKey === 'BROADWAY_HEAVY')   recSizes = [33,50];
+    if (catKey === 'TWO_TONE_DYNAMIC') recSizes = [50,66];
+    if (catKey === 'MONOTONE')         recSizes = [66,100];
+    if (catKey === 'FOUR_TO_STRAIGHT') recSizes = [66,100,150];
 
-  const sizeRes=evalSizeAgainstGuide(sizePct ?? null, recSizes);
-  const sizeEval=sizeRes.verdict, sizeNote=sizeRes.detail;
+    const sizeRes = evalSizeAgainstGuide(sizePct ?? null, recSizes);
+    const sizeEval = sizeRes.verdict ?? 'n/a';
+    const sizeNote = sizeRes.detail ?? '';
 
-  let note = `${g.label}: Probe desirability — ${desirability}.`;
-  if (ip) note += ' In position you realize equity better; probing improves EV.';
-  else note += ' Out of position, prefer checks unless board is especially favourable.';
-  if (sizeEval && sizeEval!=='n/a') note += ` Size: ${sizeEval}. ${sizeNote}`;
-  return { probeEval, sizeEval, note, recSizes: fmtSizeRangePct(recSizes) };
+    // === NEW (M3·S4): Append villain range context (use current street key)
+    const stageKey = (stage === 'flop' ? 'flop' : stage === 'turn' ? 'turn' : 'river');
+    const rng = villainRangeContextLine(stageKey);
+
+    let note = `${g.label}: `;
+    if (desirability === 'High')   note += 'Good candidate to stab, especially in position. ';
+    if (desirability === 'Medium') note += 'Selective probing; rely on overcards/backdoors. ';
+    if (desirability === 'Low')    note += 'Usually prefer checks; stab with equity/backdoors. ';
+    note += ip ? 'IP realizes equity better. ' : 'OOP: mix in more checks; when betting, be polar. ';
+    if (sizeEval !== 'n/a') note += `Size: ${sizeEval}. ${sizeNote}`;
+    note += ` ${rng.line}`;
+
+    return {
+        probeEval,
+        sizeEval,
+        note,
+        recSizes: fmtSizeRangePct(recSizes),
+        // NEW:
+        villainRangePct: rng.pct,
+        villainRangeLabel: rng.label
+    };
 }
 
-function classifyRiverLine(actionLabel, sizePct, hole, board){
-  const made = describeMadeHand(hole, board);
-  const cat = made.cat, label = made.label;
-  let line='Check-back', expl='';
+// === Improved River Line Evaluation  ===
+function classifyRiverLine(actionLabel, sizePct, hole, board) {
+    const made = describeMadeHand(hole, board);
+    const cat = made.cat;
+    const tex = analyzeBoard(board, hole);
+    const ip = inPositionHeuristic(currentPosition());
 
-  if (actionLabel==='bet' || actionLabel==='raise'){
-    if (cat>=2){ line='Value'; expl=`Strong made hand on river (${label}). Betting for value makes sense.`; }
-    else if (cat===1){ if ((sizePct??0)<=50){ line='Thin Value'; expl=`One Pair with small/medium size — thin value line.`; }
-      else { line='Polar (value/bluff)'; expl=`One Pair with large size — often better as check or polar line; be selective.`; } }
-    else { line='Bluff'; expl=`No made hand of strength — your river bet functions as a bluff.`; }
-  } else if (actionLabel==='call'){
-    if (cat>=2){ line='Value-catch'; expl=`Two Pair+ — calling to realize value vs bluffs or thin bets.`; }
-    else if (cat===1){ line='Bluff-catcher'; expl=`One Pair — classic bluff-catch spot; ensure price is right.`; }
-    else { line='Speculative call'; expl=`Weak hand — river calls without strength are rarely profitable.`; }
-  } else if (actionLabel==='check'){
-    if (cat>=2){ line='Missed value (sometimes ok)'; expl=`You hold ${label}. Consider betting unless trapping or inducing.`; }
-    else if (cat===1){ line='Pot control'; expl=`Checking One Pair — reasonable to avoid thin value vs stronger ranges.`; }
-    else { line='Give up'; expl=`No showdown value worth betting; check and realize whatever equity remains.`; }
-  } else if (actionLabel==='fold'){
-    line='Check-fold'; expl=`You chose to fold — acceptable when price is poor or range is dominated.`;
-  }
+    const isNuts = isAbsoluteNutsOnRiver(hole, board).abs;
+    const strongValue = (cat >= 2);
+    const midValue = (cat === 1);
+    const weakSD = (cat === 0);
+    const scary = tex.mono || tex.fourToStraight || tex.paired;
 
-  let badge='gray';
-  if (line==='Value' || line==='Value-catch' || line==='Thin Value') badge='green';
-  if (line==='Bluff-catcher' || line.includes('Missed') || line==='Pot control') badge='amber';
-  if (line==='Bluff' || line==='Give up' || line==='Check-fold' || line==='Polar (value/bluff)') badge='purple';
-  return { riverLine: line, riverExplain: expl, madeLabel: label, badge };
+    let sizingIntent = "small";
+    if (sizePct >= 75 && sizePct < 125) sizingIntent = "medium";
+    if (sizePct >= 125) sizingIntent = "large";
+
+    let line = "", expl = "", badge = "gray";
+
+    if (actionLabel === 'fold') {
+        return { riverLine:"Fold", riverExplain:"You chose to fold — acceptable when your range is capped or price is poor.", madeLabel:made.label, badge:"red" };
+    }
+
+    if (actionLabel === 'bet' || actionLabel === 'raise') {
+        if (isNuts) { line="Value (Nuts)"; expl="You hold the nuts — betting for maximum value is ideal."; badge="green"; }
+        else if (strongValue) {
+            if (scary) { line="Thin / Protection Value"; expl="Board is scary, but your made hand is strong enough to value bet cautiously."; badge="green"; }
+            else { line="Value"; expl="Strong made hand — betting for value is correct."; badge="green"; }
+        } else if (midValue) {
+            if (scary) { line="Polar Bet (Bluff or thin value)"; expl="One pair on a dangerous river — this should be a polar bet, chosen selectively."; badge="amber"; }
+            else if (sizingIntent === "small") { line="Thin Value"; expl="Small bet targeting weaker bluff‑catchers — appropriate thin value line."; badge="green"; }
+            else { line="Polar Bluff"; expl="Large bet with marginal value — typically a polarized (bluff/value) line."; badge="purple"; }
+        } else {
+            line="Bluff"; expl="No showdown value — betting functions as a bluff."; badge="purple";
+        }
+    } else if (actionLabel === 'check') {
+        if (isNuts) { line="Missed Value"; expl="You hold the nuts — checking misses significant value."; badge="amber"; }
+        else if (strongValue) { line="Slowplay / Induce"; expl= ip ? "Checking strong value in position can induce bluffs." : "OOP check with strong value can be used to bluff‑catch or induce."; badge="green"; }
+        else if (midValue) { line="Pot Control"; expl="One pair — checking avoids thin value bets against stronger ranges."; badge="amber"; }
+        else { line="Give Up / Realize Equity"; expl="High card — checking is correct to take a cheap showdown."; badge="gray"; }
+    } else {
+        return { riverLine:"Check", riverExplain:"River spot defaults to a neutral check.", madeLabel:made.label, badge:"gray" };
+    }
+
+    // === NEW (M3·S4): tack on villain range context for river
+    const rng = villainRangeContextLine("river");
+    expl += ` ${rng.line}`;
+
+    return { riverLine:line, riverExplain:expl, madeLabel:made.label, badge };
 }
 
 // ==================== Equity Swing Alert — helpers ====================
@@ -4117,60 +3674,62 @@ if (!RANGES_JSON) {
   heroActions.turn    = { action:null, sizePct:null, barrel:null };
   heroActions.river   = { action:null, sizePct:null, barrel:null };
 
-// === Phase 1 engine: build table + villains' actions up to hero (JSON‑driven) ===
+// === Phase 1 engine: build table + villains' actions up to hero ===
 const sb = toStep5(BLINDS.sb), bb = toStep5(BLINDS.bb);
 initTableForNewHand();
-const pf = preflopSimulateBeforeHero(); // NEW
+const pf = runPreflopUpToHero();
 pot = pf.potLocal;
 toCall = pf.toCallLocal;
 currentStageIndex = 0;
 preflopAggressor = pf.openerSeat ? 'villain' : null;
+// Friendly label for the UI
 scenario = { label: pf.label, potFactor: 0 };
 
-// Persist preflop context for survivors & UI (participants were set inside preflopSimulateBeforeHero)
 engineSetPreflopContext(pf.openerSeat, pf.threeBetterSeat, pf.coldCallers, pf.openToBb);
-// Memo the 3-bet raise-to (in BB) for later 4-bet math (stored on ENGINE.preflop by the simulator)
-try { ENGINE.preflop.threeBetToBb = (pf.threeBetterSeat ? Number(pf.threeBetToBb) : null); } catch(e){}
 
-// Paint UI
-renderCards();
-setPositionDisc();
-setPreflopBadge();
-updatePreflopSizePresets(); // labels: ×BB for open; ×(open) for 3-bet
+  renderCards();
+  setPositionDisc();
+  setPreflopBadge();
+
+// NEW: mark early preflop folders (before Hero) as red on the discs
+(function markPreflopFolders(){
+  const hero = currentPosition();
+  // Build list of seats that act before hero in preflop order
+  const before = [];
+  for (const s of ACTION_ORDER) { if (s === hero) break; before.push(s); }
+
+  // Seats that are definitely still live before hero: opener, 3-bettor, cold callers (if any)
+  const keep = new Set();
+  if (pf.openerSeat) keep.add(pf.openerSeat);
+  if (pf.threeBetterSeat) keep.add(pf.threeBetterSeat);
+  (pf.coldCallers || []).forEach(s => keep.add(s));
+
+  // Mark seats that acted before hero and did NOT continue as folded_now (red)
+  before.forEach(seat => {
+    ENGINE.statusBySeat[seat] = keep.has(seat) ? "in" : "folded_now";
+  });
+})();
+
+updatePreflopSizePresets(); // NEW: set correct basis (×BB vs × of open)
 renderPositionStatusRow();
 updatePotInfo();
 updateHintsImmediate();
 maybeStartTimer();
-
 }
 
-// Stage-aware "all folded" banner.
-// Pass 'preflop' explicitly for true walks; otherwise pass the current street key.
-function showAllFoldedMessage(stageKey) {
-  if (!feedbackEl) return;
-
-  // Clear any prior feedback for clarity
-  feedbackEl.innerHTML = "";
-
-  // Pretty print the stage
-  const key = (stageKey || STAGES[currentStageIndex] || '').toString().toLowerCase();
-  const pretty =
-    key === 'preflop' ? 'Pre-flop' :
-    key === 'flop'    ? 'Flop'     :
-    key === 'turn'    ? 'Turn'     :
-    key === 'river'   ? 'River'    :
-    key.toUpperCase();
-
-  feedbackEl.insertAdjacentHTML('beforeend', `
-    <div class="walk-banner" role="status" aria-live="polite">
-      <strong>All folded ${pretty} — you win the pot.</strong>
-    </div>
-  `);
-}
-
-// Back-compat adapter (used by preflop-walk path)
 function showWalkMessage() {
-  showAllFoldedMessage('preflop');
+    if (!feedbackEl) return;
+
+    // Clear any prior feedback for clarity
+    // (If you prefer to keep previous lines, remove the next line)
+    feedbackEl.innerHTML = "";
+
+    // Insert the message line
+    feedbackEl.insertAdjacentHTML('beforeend', `
+        <div class="walk-banner" role="status" aria-live="polite">
+            <strong>Everyone folds preflop — you win the pot.</strong>
+        </div>
+    `);
 }
 
 function advanceStage(){
@@ -4194,21 +3753,12 @@ Object.keys(ENGINE.statusBySeat).forEach(seat => {
   if (currentStageIndex >= STAGES.length){ endHand(); return; }
   const stage = STAGES[currentStageIndex];
 
-// Safety: if hero is the opener or three-bettor, force PFR attribution to hero
-if (stage === "flop") {
-  const hero = currentPosition();
-  if (ENGINE.preflop.openerSeat === hero || ENGINE.preflop.threeBetterSeat === hero) {
-    preflopAggressor = 'hero';
-  }
-}
-
   // --- Equity Swing: compute prev equity on previous board snapshot (include preflop) ---
 const prevBoard = [...boardCards];
 let prevEquity = null;
 try {
   prevEquity = computeEquityStats(holeCards, prevBoard).equity;
 } catch (e) { /* ignore calc errors */ }
-
 
 // Deal new street + record that hero reached this street
 if (stage === "flop") {
@@ -4249,7 +3799,7 @@ if (stage === "flop") {
     .some(s => s !== hero && ENGINE.statusBySeat[s] === "in");
   if (!anyVillainIn) {
     renderPositionStatusRow();
-    showAllFoldedMessage(stage); // <-- say "All folded Flop/Turn/River"
+    showWalkMessage(); // already in your file
     endHand();
     return;
   }
@@ -4265,7 +3815,7 @@ if (STAGES[currentStageIndex] === "flop") {
     Object.keys(ENGINE.statusBySeat).forEach(seat => {
       if (seat !== hero) ENGINE.statusBySeat[seat] = "folded_prev";
     });
-    showAllFoldedMessage(stage); // <-- say "All folded Flop/Turn/River"
+    showWalkMessage();
     renderPositionStatusRow();
     endHand();
     return;
@@ -4438,7 +3988,7 @@ function buildEndHandResult(){
   }
 
   // Decide whether to reveal villains now (re-use your REVEAL.policy)
-  const policy = (typeof REVEAL !== 'undefined' && REVEAL && REVEAL.policy) ? REVEAL.policy : 'always_all';
+  const policy = (typeof REVEAL !== 'undefined' && REVEAL && REVEAL.policy) ? REVEAL.policy : 'always_remaining';
   const revealVillains =
     policy === 'always_all' ||
     policy === 'always_remaining' ||
@@ -4558,7 +4108,7 @@ function endHand(){
 
 // Villain reveal (Always remaining / Always all / Showdown-only / On hero fold)
 try {
-  const reveal = (REVEAL?.policy ?? 'always_all');
+  const reveal = (REVEAL?.policy ?? 'always_remaining');
 
   const heroFolded = handHistory.some(h =>
     (h.stage === 'preflop' || h.stage === 'flop' || h.stage === 'turn' || h.stage === 'river')
@@ -4634,112 +4184,81 @@ try {
 function applyHeroContribution(decision){
   const stage = STAGES[currentStageIndex];
 
-  // --- FOLD ---
+  // Folding can end the hand, as before
   if (decision === 'fold') {
     if (SETTINGS.pot.endHandOnFold) { endHand(); }
     return;
   }
 
-  // --- CALL ---
   if (decision === 'call') {
     if (toCall > 0) {
       pot = toStep5(pot + toCall);
       toCall = 0;
       updatePotInfo();
     }
-    if (stage === 'preflop') {
-      // Ensure we resolve villains after hero completes preflop action (once)
-      if (!ENGINE._resolvedAfterHero) { ENGINE._resolvedAfterHero = true; preflopResolveAfterHero('call'); }
-    }
     return;
   }
 
-  // --- RAISE ---
   if (decision === 'raise') {
+if (stage === 'preflop') {
+  const bb = toStep5(BLINDS.bb);
+  const heroSeat = currentPosition();
+  const opener = ENGINE.preflop?.openerSeat ?? null;
 
-    // ===== PRE-FLOP (Hero RFI / 3-bet) =====
-    if (stage === 'preflop') {
-      const hero = currentPosition();
-      const bb = toStep5(BLINDS.bb);
-      const opener = ENGINE.preflop?.openerSeat ?? null;
-      const threeBetter = ENGINE.preflop?.threeBetterSeat ?? null;
+  // Chips hero already posted from blinds
+  const heroAlready = (heroSeat === 'SB') ? toStep5(BLINDS.sb)
+                    : (heroSeat === 'BB') ? toStep5(BLINDS.bb)
+                    : 0;
 
-      // Record Hero stats first (context-aware: vpip + pfr or 3-bet)
-      updateHeroPreflop('raise'); // checks ENGINE.preflop to decide PFR vs 3B
+  // *** KEY FIX ***
+  const heroIsOpener = (opener === heroSeat);
+  const facingOpen   = !!opener && !heroIsOpener;
 
-      // ---- Opening first-in (RFI)
-      if (!opener) {
-        const sizeBb  = Number(heroActions?.preflop?.sizeBb ?? 2.2);
-        const raiseTo = toStep5(sizeBb * bb);
+  if (!opener || heroIsOpener) {
+    // ===== OPENING raise: ×BB basis =====
+    const sizeBB = (heroActions.preflop.sizeBb ?? 2.5);
+    const raiseTo = toStep5(sizeBB * bb);            // raise-to in chips
+    const putIn   = Math.max(0, raiseTo - heroAlready);
+    pot   = toStep5(pot + putIn);
+    toCall = 0;
+    updatePotInfo();
+    return;
+  } else {
+    // ===== 3-BET vs opener: × of opener's raise-to =====
+    const openToBb = Number(ENGINE.preflop?.openToBb ?? 2.2); // safe default if sim didn't store
+    const iHero    = ACTION_ORDER.indexOf(heroSeat);
+    const iOp      = ACTION_ORDER.indexOf(opener);
+    const heroIP   = (iHero > iOp) && heroSeat !== 'SB' && heroSeat !== 'BB';
+    const defaultMult = heroIP ? 3.0 : 4.0;
+    const mult     = (heroActions.preflop.sizeMult != null) ? heroActions.preflop.sizeMult : defaultMult;
 
-        // Stamp context + pot
-        ENGINE.preflop.openerSeat = hero;
-        ENGINE.preflop.openToBb   = sizeBb;
-        preflopAggressor          = 'hero';
-        ENGINE.preflop.participants = Array.from(new Set([...(ENGINE.preflop.participants ?? []), hero]));
-        pot = contributeRaiseTo(pot, raiseTo, hero);
+    const raiseToBb = mult * openToBb;               // raise-to in BB
+    const raiseTo   = toStep5(raiseToBb * bb);       // chips
+    const putIn     = Math.max(0, raiseTo - heroAlready);
+    pot   = toStep5(pot + putIn);
+    toCall = 0;
+    updatePotInfo();
+    return;
+  }
+}
 
-        // Label (null-safe already)
-        scenario = { label: `Hero opened ${sizeBb.toFixed(1)}x`, potFactor: 0 };
-        updatePotInfo();
+else {
+      // Postflop: Bet (toCall==0) or Raise (toCall>0)
+      const pct = heroActions[stage].sizePct ?? 50;
+      const betBase = pot; // base is current pot
+      const betAmt = toStep5((pct/100) * betBase);
 
-        // Resolve villains after Hero acts (exactly once)
-        if (!ENGINE._resolvedAfterHero) { ENGINE._resolvedAfterHero = true; preflopResolveAfterHero('raise'); }
-        return;
-      }
+      // If facing a bet, a raise is (call + extra). Keep it trainer-simple:
+      // raise contribution = toCall + betAmt
+      const putIn = (toCall > 0) ? toStep5(toCall + betAmt) : betAmt;
 
-      // ---- Versus an open (no 3-bettor yet) → Hero 3-bets
-      if (opener && !threeBetter) {
-        // If, for any reason, opener was hero, avoid mis-labelling as 3-bet
-        if (opener === hero) { updatePotInfo(); return; }
-
-        // Use opener's known size or safe fallback
-        const knownOpenBb = (ENGINE.preflop.openToBb != null)
-          ? Number(ENGINE.preflop.openToBb)
-          : Number(standardOpenSizeBb(opener));
-
-        const openTo  = toStep5(knownOpenBb * bb);
-        const heroIP  = (["CO","BTN"].includes(hero) && !["CO","BTN"].includes(opener));
-        const mult    = Number(heroActions?.preflop?.sizeMult ?? (heroIP ? 3.0 : 4.0));
-        const threeTo = toStep5(mult * openTo);
-
-        ENGINE.preflop.threeBetterSeat = hero;
-        ENGINE.preflop.threeBetToBb    = threeTo / bb;
-        preflopAggressor               = 'hero';
-        ENGINE.preflop.participants    = Array.from(new Set([...(ENGINE.preflop.participants ?? []), hero]));
-        pot = contributeRaiseTo(pot, threeTo, hero);
-
-        const openX  = knownOpenBb.toFixed(1);
-        const threeX = (threeTo / bb).toFixed(1);
-        scenario = { label: `${opener} opened ${openX}x · Hero 3‑bet ${threeX}x`, potFactor: 0 };
-        updatePotInfo();
-
-        // Resolve villains after Hero acts (exactly once)
-        if (!ENGINE._resolvedAfterHero) { ENGINE._resolvedAfterHero = true; preflopResolveAfterHero('raise'); }
-        return;
-      }
-
-      // ---- If opener & 3-bettor already exist, your 4-bet UI may be separate; keep pot/UI consistent if enabled
-      updatePotInfo();
-      if (!ENGINE._resolvedAfterHero) { ENGINE._resolvedAfterHero = true; preflopResolveAfterHero('raise'); }
-      return;
-    }
-
-    // ===== POST-FLOP (bet or raise)
-    {
-      const pct = heroActions[stage]?.sizePct ?? 50;
-      const betBase = pot;
-      const betAmt  = toStep5((pct / 100) * betBase);
-      const putIn   = (toCall > 0) ? toStep5(toCall + betAmt) : betAmt;
-
-      pot   = toStep5(pot + putIn);
+      pot = toStep5(pot + putIn);
       toCall = 0;
       updatePotInfo();
       return;
     }
   }
 }
- 
 
 // ==================== Submit handling (with coaching) ====================
 inputForm.addEventListener("submit", (e)=>{
@@ -4751,26 +4270,9 @@ inputForm.addEventListener("submit", (e)=>{
   const decision = new FormData(inputForm).get("decision");
   const stage = STAGES[currentStageIndex];
 
-// Guard: require a decision to be selected
-if (!decision) {
-  // Keep UI responsive: keep Submit visible if a live price exists, else allow Next
-  const hasLivePrice = (toCall > 0);
-  const msg = hasLivePrice
-    ? 'Please choose Call / Raise / Fold to respond to the bet.'
-    : 'Please choose Check / Bet / Fold before submitting.';
-  feedbackEl.insertAdjacentHTML('afterbegin', `<div class="warn">${msg}</div>`);
-  // Preserve buttons: if facing a price, stay on Submit; otherwise, allow Next
-  submitStageBtn.classList.toggle('hidden', !hasLivePrice);
-  nextStageBtn.classList.toggle('hidden',  hasLivePrice);
-  if (barSubmit) barSubmit.classList.toggle('hidden', !hasLivePrice);
-  if (barNext)   barNext.classList.toggle('hidden',  hasLivePrice);
-  return;
-}
-
 // Decide what the action *means* before we change any pot/toCall
-  const actionLabelPre   = determinePostflopAction(decision, toCall);
-  const hadLivePricePre  = (toCall > 0);
-  const stageNow         = STAGES[currentStageIndex];
+     const actionLabelPre = determinePostflopAction(decision, toCall);
+     const stageNow = STAGES[currentStageIndex];
 
 // --- HERO METRICS (preflop) ---
 if (stage === 'preflop') {
@@ -4881,39 +4383,19 @@ if (stage === 'preflop') {
  applyHeroContribution(decision);
    if (decision === 'fold') return; // endHand() may have been called
 
-// --- NEW: Pre‑flop after‑hero resolver (no cycling; JSON‑driven) ---
-if (stageNow === 'preflop' && decision !== 'fold') {
-  preflopResolveAfterHero(decision);
-
-  // Keep UX: stay on this stage, show evaluation now and expose "Next Stage"
-  submitStageBtn.classList.add("hidden");
-  nextStageBtn.classList.remove("hidden");
-  if (barSubmit) barSubmit.classList.add("hidden");
-  if (barNext) barNext.classList.remove("hidden");
-
-  renderPositionStatusRow();
-  updatePotInfo();
-  updateHintsImmediate();
-  // DO NOT advance stage automatically; wait for user to click "Next Stage"
-  return;
+// === NEW: complete preflop by letting seats BEHIND hero respond (call-only after hero)
+if (stageNow === 'preflop') {
+  runPreflopAfterHero(decision);
 }
 
 // === Settle some field callers or allow stabs *based on the pre-action label*
 if (stageNow === 'flop' || stageNow === 'turn' || stageNow === 'river') {
   if (actionLabelPre === 'bet' || actionLabelPre === 'raise') {
-  
-  // Existing behavior: add some callers behind
+    // Existing behavior: add some callers behind
     settleVillainsAfterHero(stageNow, actionLabelPre);
   } else if (actionLabelPre === 'check') {
     // NEW: let villains stab behind your check
     villainsActAfterHeroCheck(stageNow);
-
- } else if (actionLabelPre === 'call' && hadLivePricePre) {
-// DVE hook: let engine settle on hero CALL vs a live price, then advance
- try { settleVillainsAfterHero(stageNow, 'call'); } catch (_) {}
-advanceStage();
-return;
-
   }
 }
 
@@ -5026,139 +4508,182 @@ feedbackEl.insertAdjacentHTML('beforeend', `
       const catKey = mapBoardToCategory(boardCards, holeCards);
       let evalBlockHtml = '';
 
-      if (stage==='flop'){
-        const isHeroPFR = (preflopAggressor==='hero');
-        const sizePct = heroActions.flop.sizePct ?? null;
-        const flopRes = evaluateFlopCbet(catKey, isHeroPFR, pos, actionLabel, sizePct);
+if (stage==='flop') {
+  const isHeroPFR = (preflopAggressor==='hero');
+  const sizePct   = heroActions.flop.sizePct ?? null;
+  const pos       = POSITIONS6[heroPosIdx];
+  const actionLbl = actionLabelPre;         // 'bet' | 'raise' | 'check' | 'call' | 'fold'
 
-        evalBlockHtml += `
-          <div style="margin-top:8px">
-            <strong>Flop Strategy:</strong>
-            <div>C‑bet: <span class="badge ${flopRes.cbetEval.includes('Correct')?'green':(flopRes.cbetEval.includes('Low‑freq')?'amber':'amber')}">${flopRes.cbetEval}</span></div>
-            <div>Size: <span class="badge ${sizeEvalBadgeColor(flopRes.sizeEval)}">${flopRes.sizeEval}</span> (Rec: ${flopRes.recFreq} · ${flopRes.recSizes})</div>
-            <div style="opacity:.9">${flopRes.note}</div>
-          </div>
-        `;
+  let evalBlockHtml = '';
 
-        const last = handHistory[handHistory.length-1];
-        if (last){
-          last.boardCards = boardToString(boardCards);
-          last.boardCategory = catKey;
-          last.betOrRaiseLabel = betRaiseLabel;
-          last.sizePct = heroActions.flop.sizePct ?? '';
-          last.cbetRecommendedFreq = flopRes.recFreq ?? '';
-          last.sizingRecommendedRange = flopRes.recSizes ?? '';
-          last.cbetEval = flopRes.cbetEval ?? '';
-          last.sizingEval = flopRes.sizeEval ?? '';
-        }
-        heroActions.flop.cbet = (isHeroPFR && actionLabel==='bet');
+  // --- C-bet evaluation (PFR only)
+  const cbet = evaluateFlopCbet(mapBoardToCategory(boardCards, holeCards), isHeroPFR, pos, actionLbl, sizePct);
+  evalBlockHtml += `
+    <div style="margin-top:8px">
+      <strong>Flop Strategy:</strong>
+      <div>C‑bet: <span class="badge ${cbet.cbetEval.includes('Correct')?'green':(cbet.cbetEval.includes('Risky')?'red':'amber')}">${cbet.cbetEval}</span></div>
+      <div>Size: <span class="badge ${sizeEvalBadgeColor(cbet.sizeEval)}">${cbet.sizeEval}</span> (Rec: ${cbet.recFreq} · ${cbet.recSizes})</div>
+      <div style="opacity:.9">${cbet.note}</div>
+    </div>
+  `;
 
-        // Non-PFR probe on flop
-        if (!isHeroPFR && isProbeSpot(actionLabel)){
-          const probeRes = evaluateProbe('flop', catKey, pos, actionLabel, heroActions.flop.sizePct ?? null);
-          evalBlockHtml += `
-            <div style="margin-top:8px">
-              <strong>Flop Probe (Non‑PFR):</strong>
-              <div>Probe: <span class="badge ${probeRes.probeEval.includes('Good')?'green':(probeRes.probeEval.includes('Risky')?'red':'amber')}">${probeRes.probeEval}</span></div>
-              <div>Size: <span class="badge ${sizeEvalBadgeColor(probeRes.sizeEval)}">${probeRes.sizeEval}</span> (Guide: ${probeRes.recSizes})</div>
-              <div style="opacity:.9">${probeRes.note}</div>
-            </div>
-          `;
-          if (last){ last.postflopRole='Non-PFR'; last.probeEval = probeRes.probeEval ?? ''; }
-        } else {
-          const last = handHistory[handHistory.length-1];
-          if (last && !last.postflopRole) last.postflopRole = (preflopAggressor==='hero') ? 'PFR' : 'Caller';
-        }
-      }
-      else if (stage==='turn'){
-        const prevBoard = boardCards.slice(0,3);
-        const isHeroPFR = (preflopAggressor==='hero');
-        const sizePct = heroActions.turn.sizePct ?? null;
-        const prevAggressive = !!heroActions.flop.cbet;
-        const turnRes = evaluateBarrel('turn', prevBoard, boardCards, isHeroPFR, pos, prevAggressive, actionLabel, sizePct);
+  // --- Optional probe coaching (Non‑PFR + Hero bet/check conditions)
+  if (!isHeroPFR && isProbeSpot(actionLabelPre)) {
+    const probe = evaluateProbe('flop', mapBoardToCategory(boardCards, holeCards), pos, actionLbl, sizePct);
+    evalBlockHtml += `
+      <div style="margin-top:8px">
+        <strong>Flop Probe (Non‑PFR):</strong>
+        <div>Probe: <span class="badge ${probe.probeEval.includes('Good')?'green':(probe.probeEval.includes('Risky')?'red':'amber')}">${probe.probeEval}</span></div>
+        <div>Size: <span class="badge ${sizeEvalBadgeColor(probe.sizeEval)}">${probe.sizeEval}</span> (Guide: ${probe.recSizes})</div>
+        <div style="opacity:.9">${probe.note}</div>
+      </div>
+    `;
+  }
 
-        evalBlockHtml += `
-          <div style="margin-top:8px">
-            <strong>Turn Strategy:</strong>
-            <div>Barrel: <span class="badge ${turnRes.barrelEval.includes('Good')?'green':(turnRes.barrelEval.includes('Risky')?'amber':'amber')}">${turnRes.barrelEval}</span></div>
-            <div>Size: <span class="badge ${sizeEvalBadgeColor(turnRes.sizeEval)}">${turnRes.sizeEval}</span> (Rec: ${turnRes.recFreq || '—'} ${turnRes.recSizes ? '· ' + turnRes.recSizes : ''})</div>
-            <div style="opacity:.9">${turnRes.note}</div>
-          </div>
-        `;
+  // --- Hand history fields (standardized)
+  const last = handHistory[handHistory.length-1];
+  if (last){
+    last.boardCards            = boardToString(boardCards);
+    last.boardCategory         = mapBoardToCategory(boardCards, holeCards);
+    last.betOrRaiseLabel       = betOrRaiseLabelForStage();
+    last.sizePct               = sizePct ?? '';
+    last.cbetEval              = cbet.cbetEval ?? '';
+    last.sizingEval            = cbet.sizeEval ?? '';
+    last.cbetRecommendedFreq   = cbet.recFreq ?? '';
+    last.sizingRecommendedRange= cbet.recSizes ?? '';
+  last.villainRangeFlopPct = flopRes.villainRangePct ?? '';
+  last.villainRangeFlopLbl = flopRes.villainRangeLabel ?? '';
+    if (!isHeroPFR && isProbeSpot(actionLabelPre)) {
+      last.postflopRole        = 'Non-PFR';
+      // Keep a short probe marker; detailed text is already in feedback
+      last.probeEval           = 'Probed';
+    } else {
+      last.postflopRole        = (preflopAggressor==='hero') ? 'PFR' : 'Caller';
+    }
+  }
 
-        const last = handHistory[handHistory.length-1];
-        if (last){
-          last.boardCards = boardToString(boardCards);
-          last.boardCategory = mapBoardToCategory(boardCards, holeCards);
-          last.betOrRaiseLabel = betRaiseLabel;
-          last.sizePct = heroActions.turn.sizePct ?? '';
-          last.cbetRecommendedFreq = turnRes.recFreq ?? '';
-          last.sizingRecommendedRange = turnRes.recSizes ?? '';
-          last.barrelEval = turnRes.barrelEval ?? '';
-          last.sizingEval = turnRes.sizeEval ?? '';
-        }
+  // --- Inject into feedback
+  if (difficulty !== "expert" && evalBlockHtml) {
+    feedbackEl.insertAdjacentHTML('beforeend', evalBlockHtml);
+}
+}
 
-        heroActions.turn.barrel = (actionLabel==='bet' || actionLabel==='raise');
+else if (stage==='turn') {
+  const prevBoard = boardCards.slice(0,3);
+  const isHeroPFR = (preflopAggressor==='hero');
+  const sizePct   = heroActions.turn.sizePct ?? null;
+  const pos       = POSITIONS6[heroPosIdx];
+  const actionLbl = actionLabelPre;
 
-        // Non-PFR probe on turn
-        if (!isHeroPFR && isProbeSpot(actionLabel)){
-          const probeRes = evaluateProbe('turn', mapBoardToCategory(boardCards, holeCards), pos, actionLabel, heroActions.turn.sizePct ?? null);
-          evalBlockHtml += `
-            <div style="margin-top:8px">
-              <strong>Turn Probe (Non‑PFR):</strong>
-              <div>Probe: <span class="badge ${probeRes.probeEval.includes('Good')?'green':(probeRes.probeEval.includes('Risky')?'red':'amber')}">${probeRes.probeEval}</span></div>
-              <div>Size: <span class="badge ${sizeEvalBadgeColor(probeRes.sizeEval)}">${probeRes.sizeEval}</span> (Guide: ${probeRes.recSizes})</div>
-              <div style="opacity:.9">${probeRes.note}</div>
-            </div>
-          `;
-          const last = handHistory[handHistory.length-1];
-          if (last){ last.postflopRole='Non-PFR'; last.probeEval = probeRes.probeEval ?? ''; }
-        } else {
-          const last = handHistory[handHistory.length-1];
-          if (last && !last.postflopRole) last.postflopRole = (preflopAggressor==='hero') ? 'PFR' : 'Caller';
-        }
-      }
-      else if (stage==='river'){
-        const prevBoard = boardCards.slice(0,4);
-        const isHeroPFR = (preflopAggressor==='hero');
-        const sizePct = heroActions.river.sizePct ?? null;
-        const prevAggressive = !!(heroActions.turn && heroActions.turn.barrel);
-        const riverRes = evaluateBarrel('river', prevBoard, boardCards, isHeroPFR, pos, prevAggressive, actionLabel, sizePct);
+  let evalBlockHtml = '';
 
-        evalBlockHtml += `
-          <div style="margin-top:8px">
-            <strong>River Strategy:</strong>
-            <div>Barrel: <span class="badge ${riverRes.barrelEval.includes('Good')?'green':(riverRes.barrelEval.includes('Risky')?'amber':'amber')}">${riverRes.barrelEval}</span></div>
-            <div>Size: <span class="badge ${sizeEvalBadgeColor(riverRes.sizeEval)}">${riverRes.sizeEval}</span> (Rec: ${riverRes.recFreq || '—'} ${riverRes.recSizes ? '· ' + riverRes.recSizes : ''})</div>
-            <div style="opacity:.9">${riverRes.note}</div>
-          </div>
-        `;
+  // --- Turn barrel evaluation (uses your improved Step 2)
+  const tRes = evaluateBarrel('turn', prevBoard, boardCards, isHeroPFR, pos, !!heroActions.flop.cbet, actionLbl, sizePct);
+  evalBlockHtml += `
+    <div style="margin-top:8px">
+      <strong>Turn Strategy:</strong>
+      <div>Barrel: <span class="badge ${tRes.barrelEval.includes('Good')?'green':(tRes.barrelEval.includes('Risky')?'amber':'amber')}">${tRes.barrelEval}</span></div>
+      <div>Size: <span class="badge ${sizeEvalBadgeColor(tRes.sizeEval)}">${tRes.sizeEval}</span> (Rec: ${tRes.recFreq || '—'} ${tRes.recSizes ? '· ' + tRes.recSizes : ''})</div>
+      <div style="opacity:.9">${tRes.note}</div>
+    </div>
+  `;
 
-        const last = handHistory[handHistory.length-1];
-        if (last){
-          last.boardCards = boardToString(boardCards);
-          last.boardCategory = mapBoardToCategory(boardCards, holeCards);
-          last.betOrRaiseLabel = betRaiseLabel;
-          last.sizePct = heroActions.river.sizePct ?? '';
-          last.cbetRecommendedFreq = riverRes.recFreq ?? '';
-          last.sizingRecommendedRange = riverRes.recSizes ?? '';
-          last.barrelEval = riverRes.barrelEval ?? '';
-          last.sizingEval = riverRes.sizeEval ?? '';
-        }
+  // --- Optional probe coaching (Non‑PFR)
+  if (!isHeroPFR && isProbeSpot(actionLabelPre)) {
+    const probe = evaluateProbe('turn', mapBoardToCategory(boardCards, holeCards), pos, actionLbl, sizePct);
+    evalBlockHtml += `
+      <div style="margin-top:8px">
+        <strong>Turn Probe (Non‑PFR):</strong>
+        <div>Probe: <span class="badge ${probe.probeEval.includes('Good')?'green':(probe.probeEval.includes('Risky')?'red':'amber')}">${probe.probeEval}</span></div>
+        <div>Size: <span class="badge ${sizeEvalBadgeColor(probe.sizeEval)}">${probe.sizeEval}</span> (Guide: ${probe.recSizes})</div>
+        <div style="opacity:.9">${probe.note}</div>
+      </div>
+    `;
+  }
 
-        // River line classification
-        const rc = classifyRiverLine(actionLabel, heroActions.river.sizePct ?? null, holeCards, boardCards);
-        evalBlockHtml += `
-          <div style="margin-top:8px">
-            <strong>River Line:</strong>
-            <span class="badge ${rc.badge}">${rc.riverLine}</span>
-            <div style="opacity:.9">${rc.riverExplain}</div>
-          </div>
-        `;
-        if (last){ last.riverLineType = rc.riverLine; last.riverMadeHand = rc.madeLabel; }
-      }
+  // --- Hand history fields
+  const last = handHistory[handHistory.length-1];
+  if (last){
+    last.boardCards            = boardToString(boardCards);
+    last.boardCategory         = mapBoardToCategory(boardCards, holeCards);
+    last.betOrRaiseLabel       = betOrRaiseLabelForStage();
+    last.sizePct               = sizePct ?? '';
+    last.barrelEval            = tRes.barrelEval ?? '';
+    last.sizingEval            = tRes.sizeEval ?? '';
+    last.cbetRecommendedFreq   = tRes.recFreq ?? '';
+    last.sizingRecommendedRange= tRes.recSizes ?? '';
+ last.villainRangeTurnPct = tRes.villainRangePct ?? '';
+ last.villainRangeTurnLbl = tRes.villainRangeLabel ?? '';
+    if (!isHeroPFR && isProbeSpot(actionLabelPre)) {
+      last.postflopRole        = 'Non-PFR';
+      last.probeEval           = 'Probed';
+    } else if (!last.postflopRole) {
+      last.postflopRole        = (preflopAggressor==='hero') ? 'PFR' : 'Caller';
+    }
+  }
 
-      if (evalBlockHtml) feedbackEl.insertAdjacentHTML('beforeend', evalBlockHtml);
+if (difficulty !== "expert" && evalBlockHtml) {
+    feedbackEl.insertAdjacentHTML('beforeend', evalBlockHtml);
+}
+}
+
+
+else if (stage==='river') {
+  const prevBoard = boardCards.slice(0,4);
+  const isHeroPFR = (preflopAggressor==='hero');
+  const sizePct   = heroActions.river.sizePct ?? null;
+  const pos       = POSITIONS6[heroPosIdx];
+  const actionLbl = actionLabelPre;
+
+  let evalBlockHtml = '';
+
+  // --- River barrel evaluation uses evaluateBarrel for consistency of notes (freq/size framing)
+  const rRes = evaluateBarrel('river', prevBoard, boardCards, isHeroPFR, pos, !!(heroActions.turn && heroActions.turn.barrel), actionLbl, sizePct);
+  evalBlockHtml += `
+    <div style="margin-top:8px">
+      <strong>River Strategy:</strong>
+      <div>Barrel: <span class="badge ${rRes.barrelEval.includes('Good')?'green':(rRes.barrelEval.includes('Risky')?'amber':'amber')}">${rRes.barrelEval}</span></div>
+      <div>Size: <span class="badge ${sizeEvalBadgeColor(rRes.sizeEval)}">${rRes.sizeEval}</span> (Rec: ${rRes.recFreq || '—'} ${rRes.recSizes ? '· ' + rRes.recSizes : ''})</div>
+      <div style="opacity:.9">${rRes.note}</div>
+    </div>
+  `;
+
+  // --- River line classification (Step 4)
+  const rc = classifyRiverLine(actionLbl, sizePct ?? null, holeCards, boardCards);
+  evalBlockHtml += `
+    <div style="margin-top:8px">
+      <strong>River Line:</strong>
+      <span class="badge ${rc.badge}">${rc.riverLine}</span>
+      <div style="opacity:.9">${rc.riverExplain}</div>
+    </div>
+  `;
+
+  // --- Hand history fields
+  const last = handHistory[handHistory.length-1];
+  if (last){
+    last.boardCards            = boardToString(boardCards);
+    last.boardCategory         = mapBoardToCategory(boardCards, holeCards);
+    last.betOrRaiseLabel       = betOrRaiseLabelForStage();
+    last.sizePct               = sizePct ?? '';
+    last.barrelEval            = rRes.barrelEval ?? '';
+    last.sizingEval            = rRes.sizeEval ?? '';
+    last.cbetRecommendedFreq   = rRes.recFreq ?? '';
+    last.sizingRecommendedRange= rRes.recSizes ?? '';
+    last.riverLineType         = rc.riverLine;
+    last.riverMadeHand         = rc.madeLabel;
+ last.villainRangeRiverPct = rRes.villainRangePct ?? '';
+ last.villainRangeRiverLbl = rRes.villainRangeLabel ?? '';
+
+  }
+
+  if (difficulty !== "expert" && evalBlockHtml) {
+    feedbackEl.insertAdjacentHTML('beforeend', evalBlockHtml);
+}
+}
+
+      if (difficulty !== "expert" && evalBlockHtml) {
+    feedbackEl.insertAdjacentHTML('beforeend', evalBlockHtml);
+}
 
       // Store sim context
       const last = handHistory[handHistory.length-1];
@@ -5414,14 +4939,6 @@ function createSettingsPanel(){
 
       <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
 
-<!-- Advanced panel toggle -->
-<div style="margin-top:12px;">
-  <label>
-    <input type="checkbox" id="advToggleSampler" />
-    Show advanced sampler diagnostics
-  </label>
-</div>
-
 
 <div style="grid-column:1/3;border-top:1px solid #374151;margin:8px 0"></div>
 <label>Villain reveal</label>
@@ -5487,15 +5004,6 @@ resetBtn.addEventListener('click', () => {
 row.appendChild(resetBtn);
 row.appendChild(hint);
 
-// ---- Attach sampler debug listener NOW that the element exists ----
-const adv = panel.querySelector('#advToggleSampler');
-if (adv) {
-    adv.addEventListener('change', e => {
-        SHOW_SAMPLER_DEBUG = e.target.checked;
-        console.log("Sampler debug =", SHOW_SAMPLER_DEBUG);
-    });
-}
-
 // --- Insert Reset Personalities BEFORE the Apply button row ---
 const applyRow = panel.querySelector('div[style*="justify-content:flex-end"]');
 panel.insertBefore(sep, applyRow);
@@ -5543,7 +5051,7 @@ panel.insertBefore(row, applyRow);
 
 // Save villain reveal policy
 const rp = panel.querySelector('#set_reveal_policy');
-if (rp) REVEAL.policy = rp.value || 'always_all';
+if (rp) REVEAL.policy = rp.value || 'always_remaining';
 
     // NEW: apply blinds (always £5-rounded)
     const newSB = toStep5(parseFloat(panel.querySelector("#set_sb").value) || BLINDS.sb);
@@ -5745,27 +5253,54 @@ function setupPhase2UI(){
 }
 
 // ==================== Event wiring ====================
-difficultySelect.addEventListener("change", ()=>{
-  difficulty = difficultySelect.value;
-  clearTimer();
-  if (difficulty==="beginner"){
-    timerRange.disabled = true;
-    if (timerCountdownEl) timerCountdownEl.textContent = "No timer in Beginner Mode";
-    if (kpiTimerEl) kpiTimerEl.textContent = "Time: —";
-   } else {
-           timerRange.disabled = false;
+difficultySelect.addEventListener("change", () => {
+    difficulty = difficultySelect.value;
 
-       // Default Intermediate & Expert to 59 seconds
-         timerSeconds = 59;
-         timerRange.value = 59;
-         timerValueEl.textContent = "59";
+    // --- BEGINNER MODE ---
+    if (difficulty === "beginner") {
+        clearTimer();
+        timerRange.disabled = true;
+        if (timerCountdownEl) timerCountdownEl.textContent = "No timer in Beginner Mode";
+        if (kpiTimerEl) kpiTimerEl.textContent = "Time: —";
 
-    startTimer();
-}
-  updatePotInfo();
-  updateHintsImmediate();
-  setPreflopBadge();
+        // Show live hints in beginner
+        if (hintsEl) hintsEl.style.display = "block";
+        updateHintsImmediate();
+    }
+
+    // --- INTERMEDIATE MODE ---
+    if (difficulty === "intermediate") {
+        timerRange.disabled = false;
+
+        timerSeconds = 59;
+        timerRange.value = 59;
+        timerValueEl.textContent = "59";
+        startTimer();
+
+        // Hide live hints
+        if (hintsEl) hintsEl.style.display = "none";
+        if (hintsEl) hintsEl.innerHTML = "";
+    }
+
+    // --- EXPERT MODE ---
+    if (difficulty === "expert") {
+        timerRange.disabled = false;
+
+        timerSeconds = 59;
+        timerRange.value = 59;
+        timerValueEl.textContent = "59";
+        startTimer();
+
+        // Strict no-help mode
+        if (hintsEl) hintsEl.style.display = "none";
+        if (hintsEl) hintsEl.innerHTML = "";
+    }
+
+    // Always update pot + preflop badge logic
+    updatePotInfo();
+    setPreflopBadge();
 });
+
 timerRange.addEventListener("input", () => { timerSeconds = parseInt(timerRange.value, 10) || 10; timerValueEl.textContent = timerSeconds; });
 newHandBtn.addEventListener("click", async () => { await startNewHand(); });
 downloadCsvBtn.addEventListener("click", () => { downloadCsv(); });
@@ -6040,26 +5575,77 @@ function postflopVillainActionsUpToHero(stage){
       pot,
       turnCardContext: turnCtx
     };
-    const a = DVE_getVillainAction(ctx);
+   
+const a = DVE_getVillainAction(ctx);
+const act = a?.action ?? 'check'; // default to 'check' if engine returns nothing
 
-    if (a.action === 'fold'){
-      ENGINE.statusBySeat[seat] = 'folded_now';
-      continue;
-    }
-    if (a.action === 'call'){
-      pot = toStep5(pot + pendingToCall);
-      continue;
-    }
-    if (a.action === 'bet'){
-      const amt = Math.max(5, toStep5((a.sizePct/100) * pot));
-      pendingToCall = amt;
-      STREET_CTX.openBetToCall = amt;     // <-- remember live price
-      pot = toStep5(pot + amt);           // <-- add bettor’s chips now
-      scenario = { label: `${seat} bets ${a.sizePct}%`, potFactor: 0 };
-      STREET_CTX.openBettor = seat;
-      STREET_CTX.openSizePct = a.sizePct;
-    }
+// --- No live price -> villain can BET or CHECK (fold is rare but keep guard)
+if (pendingToCall === 0) {
+  if (act === 'bet') {
+    // OPEN BET
+    const amt = Math.max(5, toStep5((a.sizePct / 100) * pot));
+    pendingToCall = amt;
+    STREET_CTX.openBetToCall = amt;     // remember live price for hero
+    pot = toStep5(pot + amt);           // add bettor’s chips now (your current model)
+    scenario = { label: `${seat} bets ${a.sizePct}%`, potFactor: 0 };
+    STREET_CTX.openBettor = seat;
+    STREET_CTX.openSizePct = a.sizePct;
+
+    updateVillainRange(stage, "bet");
+    continue;
   }
+
+  if (act === 'fold') {
+    // (Uncommon, but keep robust)
+    ENGINE.statusBySeat[seat] = 'folded_now';
+    updateVillainRange(stage, "fold");
+    continue;
+  }
+
+  // Otherwise treat as CHECK
+  updateVillainRange(stage, "check");
+  continue;
+}
+
+// --- There IS a live price -> villain can FOLD, CALL, or RAISE
+if (act === 'fold') {
+  ENGINE.statusBySeat[seat] = 'folded_now';
+  updateVillainRange(stage, "fold");
+  continue;
+}
+
+if (act === 'call') {
+  pot = toStep5(pot + pendingToCall);
+  updateVillainRange(stage, "call");
+  continue;
+}
+
+if (act === 'bet') {
+  // TREAT AS RAISE (since a live price exists)
+  // "Raise-to" model: at least 2x current price, or a size derived from pct of pot
+  const raiseTo = Math.max(
+    pendingToCall * 2,
+    toStep5((a.sizePct / 100) * pot)
+  );
+  const extra = Math.max(0, raiseTo - pendingToCall);
+  pendingToCall = raiseTo;
+  STREET_CTX.openBetToCall = raiseTo;
+
+  // Add only the extra over the call (your pot model adds the bettor’s chips now)
+  pot = toStep5(pot + extra);
+
+  scenario = { label: `${seat} raises to ${a.sizePct}%`, potFactor: 0 };
+  STREET_CTX.openBettor = seat;
+  STREET_CTX.openSizePct = a.sizePct;
+
+  updateVillainRange(stage, "raise");
+  continue;
+}
+
+// Fallback (shouldn’t happen): treat as check when something unexpected occurs
+updateVillainRange(stage, "check");
+
+}
 
   toCall = toStep5(pendingToCall);
   updatePotInfo();
