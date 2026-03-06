@@ -1884,6 +1884,7 @@ function contributeCallTo(pot, targetTo, seat){
 // ===== PREFLOP ENGINE v3 — VILLAINS BEFORE HERO =====
 function runPreflopUpToHero() {
   const heroSeat = currentPosition();
+ ENGINE.preflop.participants = [];   // reset participants for behind-hero action
   const sb = toStep5(BLINDS.sb);
   const bb = toStep5(BLINDS.bb);
 
@@ -1928,6 +1929,7 @@ if (window.DEBUG_PREFLOP) console.log('%c[PF] OPENER SET','color:#60a5fa', { ope
         threeBetToBb = threeBetSizeBb(openerSeat, seat, openToBb);
  if (window.DEBUG_PREFLOP) console.log('%c[PF] 3BETTER SET','color:#60a5fa', { threeBetterSeat, threeBetToBb }); // [DBG]
         potLocal = contributeRaiseTo(potLocal, bbToChips(threeBetToBb), seat);
+   ENGINE.preflop.participants.push(seat);
         break; // stop at the 3-bet
       }
     }
@@ -2027,15 +2029,22 @@ function runPreflopAfterHero(heroDecision) {
         threeBetToBb = threeBetSizeBb(openerSeat, seat, openToBb);
         pot = contributeRaiseTo(pot, bbToChips(threeBetToBb), seat);
         if (window.DEBUG_PREFLOP) console.log('%c[PF] 3BET TAKEN','color:#60a5fa', { threeBetterSeat, threeBetToBb }); // [DBG]
-        newCallers.push(seat); // just a visual tag in your code
-        continue;
-      }
+      if (takeWithFreq(freq3)) {
+    threeBetterSeat = seat;
+    threeBetToBb = threeBetSizeBb(openerSeat, seat, openToBb);
+    pot = contributeRaiseTo(pot, bbToChips(threeBetToBb), seat);
+    if (window.DEBUG_PREFLOP) console.log('%c[PF] 3BET TAKEN','color:#60a5fa', { threeBetterSeat, threeBetToBb });
+    
+continue; //  NO newCallers.push(seat)
+}
+      
 
       const freqCall = getJsonCallDecision(seat, openerSeat, code);
       const callKey = (seat === 'BB') ? `BB_vs_${openerSeat}` : `${seat}_vs_${openerSeat}`;
       if (window.DEBUG_PREFLOP) console.log('[PF·AFTER·CALL]', { seat, openerSeat, code, key:callKey, freqCall }); // [DBG]
       if (takeWithFreq(freqCall)) {
         pot = contributeCallTo(pot, bbToChips(openToBb), seat);
+   ENGINE.preflop.participants.push(seat);
         newCallers.push(seat);
         if (window.DEBUG_PREFLOP) console.log('%c[PF] CALL TAKEN','color:#22c55e', { seat }); // [DBG]
         continue;
