@@ -1361,6 +1361,7 @@ function countOpponentsInPlay(board){
 function engineSetPreflopContext(openerSeat, threeBetterSeat, coldCallers, openToBb){
   ENGINE.preflop.openerSeat = openerSeat ?? null;
   ENGINE.preflop.threeBetterSeat = threeBetterSeat ?? null;
+  ENGINE.preflop.threeBetToBb    = threeBetToBb ?? null;   // <-- REQUIRED
   ENGINE.preflop.coldCallers = Array.isArray(coldCallers) ? coldCallers.slice() : [];
   ENGINE.preflop.openToBb = (openToBb == null ? null : Number(openToBb)); // NEW: opener raise-to (in BB)
   // Keep a flat list of preflop participants — used if the hand ends preflop
@@ -2007,6 +2008,13 @@ function runPreflopAfterHero(heroDecision) {
     if (!openerSeat && heroDecision === "raise") {
       openerSeat = heroSeat;
       openToBb = heroActions.preflop.sizeBb ?? standardOpenSizeBb(heroSeat);
+
+
+// FIX: reset stale 3-bet metadata when hero is opener
+  threeBetterSeat = null;
+    ENGINE.preflop.threeBetterSeat = null;
+    ENGINE.preflop.threeBetToBb = null;
+
       if (window.DEBUG_PREFLOP) console.log('%c[PF] HERO SET AS OPENER','color:#60a5fa', { openerSeat, openToBb }); // [DBG]
     }
 
@@ -3719,6 +3727,9 @@ ENGINE.lastStreetComputed = 'preflop';
 // Reset preflop metadata
 ENGINE.preflop.openerSeat = null;
 ENGINE.preflop.threeBetterSeat = null;
+ENGINE.preflop.threeBetToBb = null;     // <-- REQUIRED
+ENGINE.preflop.openToBb = null;         // <-- strongly recommended
+
 ENGINE.preflop.participants = [];
 
   submitStageBtn.classList.remove("hidden");
