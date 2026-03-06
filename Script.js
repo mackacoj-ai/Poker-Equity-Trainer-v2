@@ -2037,7 +2037,7 @@ function runPreflopAfterHero(heroDecision) {
     
 continue; //  NO newCallers.push(seat)
 }
-      
+      }    
 
       const freqCall = getJsonCallDecision(seat, openerSeat, code);
       const callKey = (seat === 'BB') ? `BB_vs_${openerSeat}` : `${seat}_vs_${openerSeat}`;
@@ -5849,3 +5849,4 @@ function settleVillainsAfterHero(stage, heroAction){
 })();
 
 /* === END deterministic engine block === */
+
