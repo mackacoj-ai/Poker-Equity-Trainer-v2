@@ -1358,12 +1358,13 @@ function countOpponentsInPlay(board){
 }
 
 // Small hook from Phase 1 to remember opener / 3-bettor
-function engineSetPreflopContext(openerSeat, threeBetterSeat, coldCallers, openToBb){
+function engineSetPreflopContext(openerSeat, threeBetterSeat, coldCallers, openToBb, threeBetToBb){
   ENGINE.preflop.openerSeat = openerSeat ?? null;
   ENGINE.preflop.threeBetterSeat = threeBetterSeat ?? null;
   ENGINE.preflop.threeBetToBb    = threeBetToBb ?? null;   // <-- REQUIRED
   ENGINE.preflop.coldCallers = Array.isArray(coldCallers) ? coldCallers.slice() : [];
   ENGINE.preflop.openToBb = (openToBb == null ? null : Number(openToBb)); // NEW: opener raise-to (in BB)
+  ENGINE.preflop.threeBetToBb = (threeBetToBb == null ? null : Number(threeBetToBb)); // NEW: 3-bet raise-to (in BB)
   // Keep a flat list of preflop participants — used if the hand ends preflop
   const parts = [];
   if (ENGINE.preflop.openerSeat) parts.push(ENGINE.preflop.openerSeat);
@@ -3773,7 +3774,7 @@ preflopAggressor = pf.openerSeat ? 'villain' : null;
 // Friendly label for the UI
 scenario = { label: pf.label, potFactor: 0 };
 
-engineSetPreflopContext(pf.openerSeat, pf.threeBetterSeat, pf.coldCallers, pf.openToBb);
+engineSetPreflopContext(pf.openerSeat, pf.threeBetterSeat, pf.coldCallers, pf.openToBb, pf.threeBetToBb);
 
   renderCards();
   setPositionDisc();
