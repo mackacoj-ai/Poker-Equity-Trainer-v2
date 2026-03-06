@@ -4344,6 +4344,10 @@ if (stage === 'preflop') {
     pot   = toStep5(pot + putIn);
     toCall = 0;
     updatePotInfo();
+
+    ENGINE.preflop.openerSeat = heroSeat;
+    ENGINE.preflop.openToBb   = sizeBB;
+
     return;
   } else {
     // ===== 3-BET vs opener: × of opener's raise-to =====
@@ -4360,6 +4364,11 @@ if (stage === 'preflop') {
     pot   = toStep5(pot + putIn);
     toCall = 0;
     updatePotInfo();
+
+// NEW: persist hero 3-bet metadata so behind seats have a valid price
+    ENGINE.preflop.threeBetterSeat = heroSeat;
+    ENGINE.preflop.threeBetToBb    = raiseToBb;
+
     return;
   }
 }
