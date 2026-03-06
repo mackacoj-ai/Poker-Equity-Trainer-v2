@@ -2037,7 +2037,8 @@ function runPreflopAfterHero(heroDecision) {
     
 continue; //  NO newCallers.push(seat)
 }
-      }    
+}
+      
 
       const freqCall = getJsonCallDecision(seat, openerSeat, code);
       const callKey = (seat === 'BB') ? `BB_vs_${openerSeat}` : `${seat}_vs_${openerSeat}`;
@@ -2071,7 +2072,26 @@ continue; //  NO newCallers.push(seat)
     }
   }
 
+ // --- compute price hero faces after behind-hero actions ---
+
+const heroAlready = (heroSeat === 'SB') ? sb : (heroSeat === 'BB' ? bb : 0);
+
+// --- compute the price Hero faces after behind-hero actions (reuse existing vars) ---
+const heroPosted = (heroSeat === 'SB') ? sb : (heroSeat === 'BB' ? bb : 0);
+
+if (threeBetterSeat) {
+  // Facing a 3-bet (either by a villain behind, or hero in another path)
+  const rTo = bbToChips(threeBetToBb);
+  toCall = Math.max(0, rTo - heroPosted);
+} else if (openerSeat) {
+  // Only an open behind hero
+  const rTo = bbToChips(openToBb);
+  toCall = Math.max(0, rTo - heroPosted);
+} else {
+  // Nobody bet behind
   toCall = 0;
+}
+
   ENGINE.preflop.openerSeat = openerSeat;
   ENGINE.preflop.threeBetterSeat = threeBetterSeat;
   ENGINE.preflop.openToBb = openToBb;
@@ -5849,4 +5869,3 @@ function settleVillainsAfterHero(stage, heroAction){
 })();
 
 /* === END deterministic engine block === */
-
