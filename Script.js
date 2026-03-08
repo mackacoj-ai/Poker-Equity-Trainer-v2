@@ -2022,59 +2022,7 @@ function runPreflopAfterHero(heroDecision) {
     }
 
 
-      // === 3-BET vs opener (villains after hero) ===
-if (openerSeat && !threeBetterSeat) {
-  const freq3 = getJsonThreeBetFreq(seat, openerSeat, code);
-  if (window.DEBUG_PREFLOP) {
-    console.log('[PF·AFTER·3BET]', {
-      seat, openerSeat, code, key: `${seat}_vs_${openerSeat}`, freq3
-    });
-  }
 
-  if (takeWithFreq(freq3)) {
-    // 3-bet TAKEN: record 3-bettor + size, add chips, and DO NOT try call/fold
-    threeBetterSeat = seat;
-    threeBetToBb = threeBetSizeBb(openerSeat, seat, openToBb);
-    pot = contributeRaiseTo(pot, bbToChips(threeBetToBb), seat);
-    if (window.DEBUG_PREFLOP) {
-      console.log('%c[PF] 3BET TAKEN', 'color:#60a5fa', { threeBetterSeat, threeBetToBb });
-    }
-  } else {
-    // No 3-bet → consider flat vs OPEN
-    const freqCall = getJsonCallDecision(seat, openerSeat, code);
-    const callKey = (seat === 'BB') ? `BB_vs_${openerSeat}` : `${seat}_vs_${openerSeat}`;
-    if (window.DEBUG_PREFLOP) {
-      console.log('[PF·AFTER·CALL]', { seat, openerSeat, code, key: callKey, freqCall });
-    }
-
-    if (takeWithFreq(freqCall)) {
-      pot = contributeCallTo(pot, bbToChips(openToBb), seat);
-      ENGINE.preflop.participants.push(seat);
-      newCallers.push(seat);
-      if (window.DEBUG_PREFLOP) console.log('%c[PF] CALL TAKEN', 'color:#22c55e', { seat });
-    } else {
-      ENGINE.statusBySeat[seat] = "folded_now";
-      if (window.DEBUG_PREFLOP) console.log('%c[PF] FOLD', 'color:#ef4444', { seat });
-    }
-  }
-  // (No 'continue' necessary — the loop will naturally proceed to the next seat)
-
-
-      const freqCall = getJsonCallDecision(seat, openerSeat, code);
-      const callKey = (seat === 'BB') ? `BB_vs_${openerSeat}` : `${seat}_vs_${openerSeat}`;
-      if (window.DEBUG_PREFLOP) console.log('[PF·AFTER·CALL]', { seat, openerSeat, code, key:callKey, freqCall }); // [DBG]
-      if (takeWithFreq(freqCall)) {
-        pot = contributeCallTo(pot, bbToChips(openToBb), seat);
-   ENGINE.preflop.participants.push(seat);
-        newCallers.push(seat);
-        if (window.DEBUG_PREFLOP) console.log('%c[PF] CALL TAKEN','color:#22c55e', { seat }); // [DBG]
-        continue;
-      }
-
-      ENGINE.statusBySeat[seat] = "folded_now";
-      if (window.DEBUG_PREFLOP) console.log('%c[PF] FOLD','color:#ef4444', { seat }); // [DBG]
-      continue;
-    }
 
     // Facing hero 3-bet (hero as 3-bettor)
     if (threeBetterSeat && heroSeat === threeBetterSeat) {
@@ -4745,8 +4693,8 @@ if (stage==='flop') {
     last.sizingEval            = cbet.sizeEval ?? '';
     last.cbetRecommendedFreq   = cbet.recFreq ?? '';
     last.sizingRecommendedRange= cbet.recSizes ?? '';
-  last.villainRangeFlopPct = flopRes.villainRangePct ?? '';
-  last.villainRangeFlopLbl = flopRes.villainRangeLabel ?? '';
+  last.villainRangeFlopPct = cbet.villainRangePct ?? '';
+  last.villainRangeFlopLbl = cbet.villainRangeLabel ?? '';
     if (!isHeroPFR && isProbeSpot(actionLabelPre)) {
       last.postflopRole        = 'Non-PFR';
       // Keep a short probe marker; detailed text is already in feedback
@@ -4903,8 +4851,16 @@ if (lettingHeroRespondThisStreet) {
 nextStageBtn.addEventListener("click", ()=> advanceStage());
 
 // Bottom bar mirroring
-if (barSubmit) barSubmit.addEventListener("click", () => { inputForm.requestSubmit(); });
-if (barNext) barNext.addEventListener("click", () => { advanceStage(); });
+if (barSubmit) {
+  barSubmit.addEventListener("click", () => {
+    inputForm.requestSubmit();
+  });
+}
+if (barNext) {
+  barNext.addEventListener("click", () => {
+    advanceStage();
+  });
+}
 
 
 // Number steppers
