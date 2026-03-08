@@ -2032,6 +2032,7 @@ function runPreflopAfterHero(heroDecision) {
       if (takeWithFreq(freqCall)) {
         pot = contributeCallTo(pot, bbToChips(threeBetToBb), seat);
         newCallers.push(seat);
+        ENGINE.preflop.coldCallers = Array.from(new Set([...(ENGINE.preflop.coldCallers ?? []), seat]));
         if (window.DEBUG_PREFLOP) console.log('%c[PF] CALL vs 3B TAKEN','color:#22c55e', { seat }); // [DBG]
         continue;
       }
